@@ -155,7 +155,7 @@ export default function App() {
         // Refresh the main list too
         const chatRes = await fetch("/api/chats");
         const chatData = await chatRes.json();
-        setRealChats(chatData);
+        setRealChats(chatData.chats || []);
       }
     } catch (e) {
       console.error("Failed to send manual response:", e);
@@ -307,39 +307,53 @@ export default function App() {
                           const scoreMap: any = { hot: 3, warm: 2, cold: 1 };
                           return (scoreMap[b.leadScore] || 1) - (scoreMap[a.leadScore] || 1);
                         })
-                        .map((chat) => (
-                        <div key={chat._id} className="p-6 flex items-center justify-between hover:bg-gray-50 transition-colors">
-                          <div className="flex items-center gap-4">
-                            <div className="w-12 h-12 bg-gray-100 rounded-2xl flex items-center justify-center font-bold text-gray-400">
-                              {chat.userId.slice(-2)}
-                            </div>
-                            <div>
-                              <p className="font-bold text-gray-900">{chat.userId}</p>
-                              <div className="flex items-center gap-2 mt-1">
-                                <span className={`text-[10px] font-bold px-2 py-0.5 rounded-full uppercase tracking-wider ${
-                                  chat.leadScore === 'hot' ? 'bg-red-100 text-red-700' : 
-                                  chat.leadScore === 'warm' ? 'bg-orange-100 text-orange-700' : 'bg-blue-100 text-blue-700'
-                                }`}>
-                                  {chat.leadScore || 'cold'}
-                                </span>
-                                <p className="text-xs text-gray-400 flex items-center gap-1 capitalize">
-                                  <span className={`w-1.5 h-1.5 rounded-full ${chat.platform === 'whatsapp' ? 'bg-green-500' : 'bg-blue-500'}`} />
-                                  {chat.platform} • {chat.messages.length} msgs
-                                </p>
+                        .map((chat) => {
+                          const profile = chat.userProfile;
+                          const name = profile?.name || chat.name || "Unknown Customer";
+                          const isPlatinum = (profile?.total_earned || 0) > 5000;
+                          const suggestedCarName = profile?.suggestedCar?.car_name || "No Car";
+                          const carCount = profile?.resolvedCars?.length || 0;
+
+                          return (
+                          <div key={chat._id} className="p-6 flex items-center justify-between hover:bg-gray-50 transition-colors">
+                            <div className="flex items-center gap-4 text-left">
+                              <div className={`w-12 h-12 rounded-2xl flex items-center justify-center font-bold text-lg ${
+                                isPlatinum ? 'bg-orange-600 text-white' : 'bg-gray-100 text-gray-400'
+                              }`}>
+                                {name.charAt(0)}
                               </div>
-                              {chat.scoreReason && (
-                                <p className="text-[10px] text-gray-400 mt-1 italic">"{chat.scoreReason}"</p>
-                              )}
+                              <div className="text-left">
+                                <div className="flex items-center gap-2">
+                                  <p className="font-black text-gray-900 truncate max-w-[140px] leading-tight">{name}</p>
+                                  {isPlatinum && (
+                                    <span className="bg-orange-100 text-orange-600 text-[8px] font-black uppercase px-1 py-0.5 rounded tracking-tighter shrink-0">Platinum</span>
+                                  )}
+                                </div>
+                                <div className="space-y-0.5 mt-0.5">
+                                  <p className="text-[10px] font-bold text-gray-400 font-mono tracking-tighter">+{chat.userId}</p>
+                                  <div className="flex items-center gap-2">
+                                    <span className={`text-[10px] font-bold px-1.5 py-0.5 rounded uppercase tracking-widest ${
+                                      chat.leadScore === 'hot' ? 'bg-red-100 text-red-700' : 
+                                      chat.leadScore === 'warm' ? 'bg-orange-100 text-orange-700' : 'bg-blue-100 text-blue-700'
+                                    }`}>
+                                      {chat.leadScore || 'cold'}
+                                    </span>
+                                    <p className="text-[10px] text-gray-400 font-bold flex items-center gap-1 capitalize">
+                                      <span className={`w-1 h-1 rounded-full ${chat.platform === 'whatsapp' ? 'bg-green-500' : 'bg-blue-500'}`} />
+                                      {suggestedCarName}
+                                    </p>
+                                  </div>
+                                </div>
+                              </div>
                             </div>
+                            <button 
+                              onClick={() => setSelectedChat(chat)}
+                              className="px-4 py-2 bg-gray-900 text-white rounded-xl text-xs font-bold hover:bg-gray-800 transition-colors"
+                            >
+                              Details
+                            </button>
                           </div>
-                          <button 
-                            onClick={() => setSelectedChat(chat)}
-                            className="px-4 py-2 bg-gray-900 text-white rounded-xl text-xs font-bold hover:bg-gray-800 transition-colors"
-                          >
-                            Take Over
-                          </button>
-                        </div>
-                      ))
+                        )})
                     )}
                   </div>
 
@@ -655,7 +669,7 @@ export default function App() {
           )}
         </AnimatePresence>
 
-        {/* Chat Modal - Moved outside main AnimatePresence to fix warnings */}
+        {/* Chat Modal */}
         <AnimatePresence>
           {selectedChat && (
             <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/50 backdrop-blur-sm">
@@ -663,58 +677,118 @@ export default function App() {
                 initial={{ opacity: 0, scale: 0.95 }}
                 animate={{ opacity: 1, scale: 1 }}
                 exit={{ opacity: 0, scale: 0.95 }}
-                className="bg-white w-full max-w-2xl h-[600px] rounded-3xl overflow-hidden flex flex-col shadow-2xl"
+                className="bg-white w-full max-w-5xl h-[700px] rounded-3xl overflow-hidden flex shadow-2xl"
               >
-                <div className="p-6 border-b border-gray-100 flex justify-between items-center bg-gray-50">
-                  <div className="flex items-center gap-4">
-                    <div className="w-12 h-12 bg-orange-100 rounded-2xl flex items-center justify-center font-bold text-orange-600">
-                      {selectedChat.userId.slice(-2)}
-                    </div>
-                    <div>
-                      <h3 className="font-bold text-lg">{selectedChat.userId}</h3>
-                      <p className="text-xs text-gray-400 capitalize">{selectedChat.platform} • {selectedChat.leadScore} lead</p>
-                    </div>
-                  </div>
-                  <button 
-                    onClick={() => setSelectedChat(null)}
-                    className="p-2 hover:bg-gray-200 rounded-full transition-colors"
-                  >
-                    <AlertCircle size={24} className="rotate-45 text-gray-400" />
-                  </button>
-                </div>
-
-                <div className="flex-1 overflow-y-auto p-6 space-y-4 bg-gray-50/50">
-                  {selectedChat.messages.map((msg: any, i: number) => (
-                    <div key={i} className={`flex ${msg.role === 'user' ? 'justify-start' : 'justify-end'}`}>
-                      <div className={`max-w-[80%] p-4 rounded-2xl ${
-                        msg.role === 'user' ? 'bg-white border border-gray-200 text-gray-800 rounded-tl-none' : 'bg-gray-900 text-white rounded-tr-none'
-                      }`}>
-                        <p className="text-sm">{msg.text}</p>
-                        <p className="text-[10px] mt-2 opacity-50">{new Date(msg.timestamp).toLocaleTimeString()}</p>
+                {/* Chat Column */}
+                <div className="flex-1 flex flex-col border-r border-gray-100">
+                  <div className="p-6 border-b border-gray-100 flex justify-between items-center bg-gray-50/50">
+                    <div className="flex items-center gap-4">
+                      <div className="w-12 h-12 bg-orange-100 rounded-2xl flex items-center justify-center font-bold text-orange-600">
+                        {selectedChat.userId.slice(-2)}
+                      </div>
+                      <div className="text-left">
+                        <h3 className="font-bold text-lg">{selectedChat.userProfile?.name || selectedChat.userId}</h3>
+                        <p className="text-xs text-gray-400 capitalize">{selectedChat.platform} • {selectedChat.leadScore} lead</p>
                       </div>
                     </div>
-                  ))}
+                    <button onClick={() => setSelectedChat(null)} className="p-2 hover:bg-gray-200 rounded-full"><AlertCircle size={24} className="rotate-45 text-gray-400" /></button>
+                  </div>
+
+                  <div className="flex-1 overflow-y-auto p-6 space-y-4 bg-white">
+                    {selectedChat.messages.map((msg: any, i: number) => (
+                      <div key={i} className={`flex ${msg.role === 'user' ? 'justify-start' : 'justify-end'}`}>
+                        <div className={`max-w-[80%] p-4 rounded-2xl ${
+                          msg.role === 'user' ? 'bg-gray-100 text-gray-800 rounded-tl-none' : 'bg-gray-900 text-white rounded-tr-none'
+                        }`}>
+                          <p className="text-sm">{msg.text}</p>
+                          <p className="text-[10px] mt-2 opacity-50">{new Date(msg.timestamp).toLocaleTimeString()}</p>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+
+                  <div className="p-6 border-t border-gray-100">
+                    <div className="flex gap-4">
+                      <input 
+                        type="text" 
+                        value={manualText}
+                        onChange={(e) => setManualText(e.target.value)}
+                        onKeyPress={(e) => e.key === 'Enter' && handleSendManual()}
+                        placeholder="Type a manual response..."
+                        className="flex-1 px-4 py-3 bg-gray-50 border border-gray-200 rounded-xl"
+                      />
+                      <button onClick={handleSendManual} disabled={!manualText.trim()} className="px-6 py-3 bg-orange-600 text-white rounded-xl font-bold hover:bg-orange-700 transition-colors">Send</button>
+                    </div>
+                  </div>
                 </div>
 
-                <div className="p-6 border-t border-gray-100 bg-white">
-                  <div className="flex gap-4">
-                    <input 
-                      type="text" 
-                      value={manualText}
-                      onChange={(e) => setManualText(e.target.value)}
-                      onKeyPress={(e) => e.key === 'Enter' && handleSendManual()}
-                      placeholder="Type a manual response..."
-                      className="flex-1 px-4 py-3 bg-gray-50 border border-gray-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-orange-500/20"
-                    />
-                    <button 
-                      onClick={handleSendManual}
-                      disabled={!manualText.trim()}
-                      className="px-6 py-3 bg-orange-600 text-white rounded-xl font-bold hover:bg-orange-700 transition-colors disabled:opacity-50"
-                    >
-                      Send
-                    </button>
+                {/* Insight Sidebar */}
+                <div className="w-80 bg-gray-50 p-8 overflow-y-auto text-left">
+                  <h4 className="text-sm font-black uppercase tracking-widest text-gray-400 mb-6">Customer Insight</h4>
+                  
+                  <div className="space-y-8">
+                    {/* User Profile Info */}
+                    <div>
+                      <p className="text-xs font-bold text-gray-400 mb-2 uppercase">Account</p>
+                      <div className="space-y-1">
+                        <p className="font-bold text-gray-900 truncate">{selectedChat.userProfile?.email || "No email linked"}</p>
+                        <p className="text-sm text-gray-500">{selectedChat.userId}</p>
+                      </div>
+                    </div>
+
+                    {/* Financials */}
+                    <div className="grid grid-cols-2 gap-4">
+                      <div className="p-3 bg-white rounded-2xl border border-gray-200">
+                        <p className="text-[10px] font-bold text-gray-400 uppercase">Wallet</p>
+                        <p className="text-sm font-black text-green-600">₹{selectedChat.userProfile?.wallet || 0}</p>
+                      </div>
+                      <div className="p-3 bg-white rounded-2xl border border-gray-200">
+                        <p className="text-[10px] font-bold text-gray-400 uppercase">Earned</p>
+                        <p className="text-sm font-black text-orange-600">₹{selectedChat.userProfile?.total_earned || 0}</p>
+                      </div>
+                    </div>
+
+                    {/* Registered Cars */}
+                    <div>
+                      <div className="flex justify-between items-center mb-3">
+                        <p className="text-xs font-bold text-gray-400 uppercase">Registered Vehicles</p>
+                        <span className="bg-orange-100 text-orange-600 px-1.5 py-0.5 rounded-full text-[10px] font-bold">{selectedChat.userProfile?.resolvedCars?.length || 0}</span>
+                      </div>
+                      <div className="space-y-2">
+                        {selectedChat.userProfile?.resolvedCars?.map((car: any, i: number) => (
+                          <div key={i} className="flex items-center gap-3 p-3 bg-white rounded-2xl border border-gray-200 relative overflow-hidden">
+                            {car.primary && <div className="absolute top-0 right-0 p-1 px-2 bg-orange-600 text-white text-[8px] font-black uppercase">Primary</div>}
+                            <div className="p-2 bg-gray-50 rounded-lg text-gray-400"><Car size={16} /></div>
+                            <div>
+                              <p className="text-xs font-bold text-gray-900">{car.car_name}</p>
+                              <p className="text-[10px] text-gray-500 uppercase font-mono">{car.vehicle_number || "No Plate"}</p>
+                            </div>
+                          </div>
+                        ))}
+                        {(!selectedChat.userProfile?.resolvedCars || selectedChat.userProfile.resolvedCars.length === 0) && (
+                          <p className="text-xs text-gray-400 italic">No cars added yet</p>
+                        )}
+                      </div>
+                    </div>
+
+                    {/* Addresses */}
+                    <div>
+                      <p className="text-xs font-bold text-gray-400 mb-3 uppercase">Saved Addresses</p>
+                      <div className="space-y-2">
+                        {selectedChat.userProfile?.user_address?.filter((a: any) => a.status === 'active').map((addr: any, i: number) => (
+                          <div key={i} className="p-3 bg-white rounded-2xl border border-gray-200 relative overflow-hidden">
+                            {(addr.primary || addr._id === selectedChat.userProfile?.suggestedAddress?._id) && (
+                              <div className="absolute top-0 right-0 p-1 px-2 bg-orange-600 text-white text-[8px] font-black uppercase">
+                                {addr.primary ? "Primary" : "Auto-Suggest"}
+                              </div>
+                            )}
+                            <p className="text-[10px] font-bold text-orange-600 uppercase mb-1">{addr.tag || "Address"}</p>
+                            <p className="text-xs text-gray-700 leading-tight">{addr.address}</p>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
                   </div>
-                  <p className="text-[10px] text-gray-400 mt-3 text-center uppercase tracking-widest">Manual Intervention Mode</p>
                 </div>
               </motion.div>
             </div>

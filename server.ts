@@ -9,6 +9,9 @@ import mongoose from "mongoose";
 import cors from "cors";
 import { Chat } from "./models/Chat.ts";
 import { User } from "./models/User.ts";
+import { Service } from "./models/Service.ts";
+import { Booking } from "./models/Booking.ts";
+import { CarModel } from "./models/CarModel.ts";
 
 dotenv.config();
 
@@ -24,6 +27,8 @@ mongoose.connect(MONGODB_URI)
 
 // Near-zero latency context cache for active sessions
 const contextCache = new Map<string, any[]>();
+// Deduplication cache for Meta webhooks (prevents retries from triggering double processing)
+const processedMids = new Map<string, number>(); 
 
 // Simple JS-based Lead Scorer
 function calculateLeadScore(messages: any[]) {
@@ -98,38 +103,77 @@ async function startServer() {
       // 2. Search main users collection if search is active
       let mergedResults = [...chats];
       if (search) {
+        const isNumeric = /^\d+$/.test(search);
         const userQuery: any = {
           $or: [
             { name: { $regex: search, $options: 'i' } },
-            { mobile_number: { $regex: search, $options: 'i' } },
             { email: { $regex: search, $options: 'i' } },
             { user_id: { $regex: search, $options: 'i' } }
           ]
         };
+        // Only add mobile_number search if the query is numeric
+        if (isNumeric) {
+          userQuery.$or.push({ mobile_number: Number(search) });
+          if (search.startsWith('91') && search.length === 12) {
+            userQuery.$or.push({ mobile_number: Number(search.substring(2)) });
+          }
+        }
         const users = await User.find(userQuery).limit(10);
         
-        // Add users who don't have a chat record yet
-        users.forEach((u: any) => {
+        // Transform the results to match chat format
+        const userResults = await Promise.all(users.map(async (u: any) => {
+          const resolvedData = await resolveUserData(u);
           const uId = u.mobile_number?.toString() || u.user_id;
-          const alreadyIn = mergedResults.some(c => c.userId === uId);
-          if (!alreadyIn) {
-            mergedResults.push({
-              _id: u._id,
-              userId: uId,
-              name: u.name,
-              platform: 'users_db',
-              leadScore: 'cold',
-              scoreReason: 'Full Customer Database Result',
-              messages: [],
-              lastUpdated: new Date(0) // Sort at bottom
-            } as any);
+          return {
+            _id: u._id,
+            userId: uId,
+            name: u.name,
+            platform: 'users_db',
+            leadScore: 'cold',
+            scoreReason: 'Full Customer Database Result',
+            messages: [],
+            lastUpdated: new Date(0),
+            userProfile: resolvedData // Attach fully resolved profile
+          };
+        }));
+
+        // Merge with active chats
+        userResults.forEach(ur => {
+          if (!mergedResults.some(c => c.userId === ur.userId)) {
+            mergedResults.push(ur as any);
           }
         });
       }
 
-      // 3. Final processing
-      const processedResults = mergedResults
-        .sort((a, b) => b.lastUpdated.getTime() - a.lastUpdated.getTime())
+      // 3. For all chats being returned, try to attach their profile data
+      const enrichedResults = await Promise.all(mergedResults.map(async (chat: any) => {
+        if (chat.userProfile) return chat;
+        try {
+          // Smart matching for phone numbers (strip '91' etc)
+          const cleanId = chat.userId.replace(/\s+/g, '').replace('+', '');
+          const isNumeric = /^\d+$/.test(cleanId);
+          
+          const query: any = { $or: [{ user_id: cleanId }] };
+          if (isNumeric) {
+            query.$or.push({ mobile_number: Number(cleanId) });
+            // Handle common 91 prefix mismatch
+            if (cleanId.startsWith('91') && cleanId.length === 12) {
+              query.$or.push({ mobile_number: Number(cleanId.substring(2)) });
+            }
+          }
+
+          const profile = await User.findOne(query);
+          const resolvedData = await resolveUserData(profile);
+          return { ...chat.toObject?.() || chat, userProfile: resolvedData };
+        } catch (err) {
+          console.error("Enrichment error:", err);
+          return chat;
+        }
+      }));
+
+      // 4. Final processing
+      const processedResults = enrichedResults
+        .sort((a, b) => (b.lastUpdated?.getTime() || 0) - (a.lastUpdated?.getTime() || 0))
         .slice(skip, skip + limit);
 
       res.json({
@@ -168,19 +212,150 @@ async function startServer() {
     const { userId, text } = req.body;
     try {
       let chat = await Chat.findOne({ userId });
-      if (chat) {
-        console.log(`\n[${new Date().toLocaleTimeString()}] 💬 DASHBOARD MANUAL MESSAGE to ${userId}: "${text}"`);
-        chat.messages.push({ role: 'model', text, timestamp: new Date() });
-        chat.lastUpdated = new Date();
-        await chat.save();
-        res.json({ success: true, chat });
-      } else {
-        res.status(404).json({ error: "Chat not found" });
+      if (!chat) return res.status(404).json({ error: "Chat not found" });
+
+      console.log(`\n[${new Date().toLocaleTimeString()}] 💬 DASHBOARD MANUAL MESSAGE to ${userId}: "${text}"`);
+
+      // 1. Send via WhatsApp API if platform is whatsapp
+      if (chat.platform === 'whatsapp' && process.env.WHATSAPP_TOKEN && process.env.WHATSAPP_PHONE_ID) {
+        try {
+          await axios.post(`https://graph.facebook.com/v17.0/${process.env.WHATSAPP_PHONE_ID}/messages`, {
+            messaging_product: "whatsapp",
+            to: userId,
+            text: { body: text },
+          }, {
+            headers: { Authorization: `Bearer ${process.env.WHATSAPP_TOKEN}` }
+          });
+        } catch (apiErr: any) {
+          if (apiErr.response?.status === 401) {
+            console.error("❌ MANUAL SEND ERROR: Token Expired");
+          } else {
+            console.error("❌ MANUAL SEND ERROR:", apiErr.response?.data || apiErr.message);
+          }
+          // Note: We still save to DB so the agent knows what they SENT, even if delivery failed
+        }
       }
+
+      // 2. Update DB
+      chat.messages.push({ role: 'model', text, timestamp: new Date() });
+      chat.lastUpdated = new Date();
+      await chat.save();
+      
+      res.json({ success: true, chat });
     } catch (error) {
+      console.error("Manual response error:", error);
       res.status(500).json({ error: "Failed to save manual response" });
     }
   });
+
+  // --- Dynamic AI Knowledge (Services & Vehicles) ---
+  let cachedServices: string = "";
+  let lastServiceFetch: number = 0;
+
+  async function resolveUserData(user: any) {
+    if (!user) return null;
+
+    // 1. Resolve Missing Car Model Names
+    const resolvedCars = await Promise.all((user.cars || []).map(async (car: any) => {
+      let resolvedName = car.car_name;
+      if (!resolvedName && car.id) {
+        try {
+          const modelData = await CarModel.findById(car.id);
+          resolvedName = modelData?.carName || "Unknown Model";
+        } catch (err) {
+          console.error("Car Model lookup error:", err);
+        }
+      }
+      return { 
+        ...car.toObject?.() || car, 
+        car_name: resolvedName || "Unknown Car" 
+      };
+    }));
+
+    // 2. Determine Suggested Car (Priority: Primary > Status 1 > Status active)
+    let suggestedCar = resolvedCars.find((c: any) => c.primary) 
+                    || resolvedCars.find((c: any) => c.status === '1') 
+                    || resolvedCars.find((c: any) => c.status === 'active')
+                    || resolvedCars[0];
+
+    // 3. Determine Suggested Address
+    const suggestedAddress = user.user_address?.find((a: any) => a.primary) 
+                          || user.user_address?.find((a: any) => a.status === 'active')
+                          || user.user_address?.[0];
+
+    return { 
+      ...user.toObject?.() || user, 
+      resolvedCars, 
+      suggestedCar, 
+      suggestedAddress 
+    };
+  }
+
+  async function getDynamicKnowledge(targetUserId: string) {
+    // 1. Get Services (with 5-min cache)
+    if (!cachedServices || Date.now() - lastServiceFetch > 300000) {
+      try {
+        const services = await Service.find({ status: 'active' }).select('name price');
+        cachedServices = services.map(s => `${s.name}: ₹${s.price}`).join(', ');
+        lastServiceFetch = Date.now();
+      } catch (err) {
+        console.error("Service fetch error:", err);
+      }
+    }
+
+    // 2. Get User's Resolved Details (Smart Matching)
+    let userContext = "";
+    try {
+      const cleanId = targetUserId.toString().replace(/\s+/g, '').replace('+', '');
+      const isNumeric = /^\d+$/.test(cleanId);
+      
+      const query: any = { $or: [{ user_id: cleanId }] };
+      if (isNumeric) {
+        query.$or.push({ mobile_number: Number(cleanId) });
+        if (cleanId.startsWith('91') && cleanId.length === 12) {
+          query.$or.push({ mobile_number: Number(cleanId.substring(2)) });
+        }
+      }
+
+      const user = await User.findOne(query);
+      const resolved = await resolveUserData(user);
+
+      if (resolved) {
+        // Cars Context (Resolved)
+        const primaryNote = resolved.suggestedCar ? ` (Suggesting ${resolved.suggestedCar.car_name} as primary choice)` : "";
+        const carsList = resolved.resolvedCars?.length > 0 
+          ? resolved.resolvedCars.map((c: any) => `${c.car_name}${c.primary ? ' [PRIMARY]' : ''}`).join(', ') 
+          : "None registered yet";
+
+        // Address Context (Resolved)
+        const addrText = resolved.suggestedAddress 
+          ? `${resolved.suggestedAddress.tag}: ${resolved.suggestedAddress.address}${resolved.suggestedAddress.primary ? ' [PRIMARY]' : ''}`
+          : "No address saved";
+
+        // Booking History Context
+        const bookingCount = await Booking.countDocuments({ customer_id: resolved._id });
+        const loyaltyLevel = bookingCount > 10 ? "VIP (Platinum)" : bookingCount > 3 ? "Regular (Gold)" : "New Friend";
+
+        userContext = `
+USER DATA:
+- Registered Cars: ${carsList} ${primaryNote}
+- Default Address: ${addrText}
+- Past Bookings: ${bookingCount} orders
+- Loyalty Status: ${loyaltyLevel}
+
+PROMPT NOTE: Use the [PRIMARY] car/address to lead the conversation. If they have many bookings, treat them like a VIP. 
+        `;
+      }
+    } catch (err) {
+      console.error("User context fetch error:", err);
+    }
+
+    return `
+AVAILABLE SERVICES (Real-time Prices):
+${cachedServices || "Basic Wash (₹499), Deep Cleaning (₹1499), Ceramic Wash (₹2999)"}
+${userContext}
+    `;
+  }
 
   // --- Gemini Setup ---
   const genAI = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY || "" });
@@ -240,9 +415,30 @@ async function startServer() {
       const entry = body.entry?.[0]?.changes?.[0]?.value;
       if (entry?.messages?.[0]) {
         const phone_number_id = entry.metadata.phone_number_id;
-        const from = entry.messages[0].from;
-        const msg_text = entry.messages[0].text?.body || "";
-        await handleMessage(from, msg_text, 'whatsapp', phone_number_id);
+        const msg = entry.messages[0];
+        const from = msg.from;
+        const msg_text = msg.text?.body || "";
+        const mid = msg.id;
+
+        // Deduplication Logic
+        if (processedMids.has(mid)) {
+          console.log(`[${new Date().toLocaleTimeString()}] ♻️  Ignoring duplicate WhatsApp message: ${mid}`);
+          return res.sendStatus(200);
+        }
+        processedMids.set(mid, Date.now());
+
+        // Acknowledge immediately BEFORE long-running AI process
+        res.sendStatus(200);
+
+        // Process in background
+        (async () => {
+          try {
+            await handleMessage(from, msg_text, 'whatsapp', phone_number_id);
+          } catch (err) {
+            console.error("Async Process Error:", err);
+          }
+        })();
+        return;
       }
       return res.sendStatus(200);
     }
@@ -252,8 +448,25 @@ async function startServer() {
       if (entry?.message) {
         const senderId = entry.sender.id;
         const msg_text = entry.message.text || "";
+        const mid = entry.message.mid;
         const platform = body.object === "instagram" ? "instagram" : "messenger";
-        await handleMessage(senderId, msg_text, platform);
+
+        if (processedMids.has(mid)) {
+          console.log(`[${new Date().toLocaleTimeString()}] ♻️  Ignoring duplicate ${platform} message: ${mid}`);
+          return res.sendStatus(200);
+        }
+        processedMids.set(mid, Date.now());
+
+        res.sendStatus(200);
+        
+        (async () => {
+          try {
+            await handleMessage(senderId, msg_text, platform);
+          } catch (err) {
+            console.error("Async Process Error:", err);
+          }
+        })();
+        return;
       }
       return res.sendStatus(200);
     }
@@ -291,27 +504,37 @@ async function startServer() {
       }
 
       // 2. Add user message
+      const start = performance.now();
       const timestamp = new Date();
       console.log(`\n[${timestamp.toLocaleTimeString()}] 📥 INCOMING [${platform}] from ${userId}: "${text}"`);
 
       const userMsg = { role: "user", text, timestamp };
       messages.push(userMsg);
 
-      // 3. Prepare AI context (Last 10 messages for deep context)
+      // 3. Prepare AI context (Dynamic Knowledge + Last 10 messages)
+      const dataStart = performance.now();
+      const dynamicKnowledge = await getDynamicKnowledge(userId);
+      const dataDuration = ((performance.now() - dataStart) / 1000).toFixed(2);
+
       const history = messages.slice(-10).map(m => ({
         role: m.role === "user" ? "user" : "model",
         parts: [{ text: m.text }]
       }));
 
       // 4. Generate AI Response
+      const aiStart = performance.now();
       const response = await genAI.models.generateContent({
-        model: process.env.GEMINI_MODEL || "gemini-3.1-flash-live-preview",
+        model: process.env.GEMINI_MODEL || "gemini-1.5-flash",
         contents: history,
-        config: { systemInstruction: CARMAA_CONTEXT },
+        config: { systemInstruction: CARMAA_CONTEXT + "\n\n" + dynamicKnowledge },
       });
+      const aiDuration = ((performance.now() - aiStart) / 1000).toFixed(2);
 
       const aiResponse = response.text || "Bro, server thoda slow hai, ek min ruko!";
+      const totalDuration = ((performance.now() - start) / 1000).toFixed(2);
+
       console.log(`[${new Date().toLocaleTimeString()}] 📤 OUTGOING [${platform}] to ${userId}: "${aiResponse.slice(0, 50)}${aiResponse.length > 50 ? '...' : ''}"`);
+      console.log(`   ⏱️  Data: ${dataDuration}s | AI: ${aiDuration}s | Total: ${totalDuration}s`);
       
       const modelMsg = { role: "model", text: aiResponse, timestamp: new Date() };
       messages.push(modelMsg);
@@ -347,8 +570,14 @@ async function startServer() {
       }
       
       return aiResponse;
-    } catch (error) {
-      console.error("Error in handleMessage:", error);
+    } catch (error: any) {
+      if (error.response?.status === 401) {
+        console.error("❌ WHATSAPP ERROR: Access Token Expired! Please update WHATSAPP_TOKEN in .env");
+      } else if (error.response?.status === 400 || error.response?.status === 403) {
+        console.error("❌ WHATSAPP ERROR:", error.response?.data?.error?.message || "Invalid Request");
+      } else {
+        console.error("Error in handleMessage:", error.message || error);
+      }
       return "Sorry bro, something went wrong!";
     }
   }
