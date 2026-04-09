@@ -32,6 +32,7 @@ export default function App() {
   const [webhookLogs, setWebhookLogs] = useState<any[]>([]);
   const [realChats, setRealChats] = useState<any[]>([]);
   const [platformFilter, setPlatformFilter] = useState("all");
+  const [searchQuery, setSearchQuery] = useState("");
   const [pagination, setPagination] = useState({ page: 1, totalPages: 1, total: 0 });
   const [messages, setMessages] = useState<Message[]>([
     { id: "1", role: "bot", text: "Namaste! I am Carmaa Bro. Gaadi chamkani hai kya? 🔥", timestamp: new Date() }
@@ -50,8 +51,8 @@ export default function App() {
         if (!res.ok) throw new Error(`Health check failed: ${res.status}`);
         const data = await res.json();
         if (data.logs) setWebhookLogs(data.logs);
-
-        const chatRes = await fetch(`/api/chats?page=${pagination.page}&limit=10&platform=${platformFilter}`);
+  
+        const chatRes = await fetch(`/api/chats?page=${pagination.page}&limit=10&platform=${platformFilter}&search=${searchQuery}`);
         if (!chatRes.ok) throw new Error(`Chats fetch failed: ${chatRes.status}`);
         const chatData = await chatRes.json();
         setRealChats(chatData.chats);
@@ -77,7 +78,7 @@ export default function App() {
     fetchData();
     const interval = setInterval(fetchData, 5000);
     return () => clearInterval(interval);
-  }, [pagination.page, platformFilter]);
+  }, [pagination.page, platformFilter, searchQuery]);
 
   // --- AI Setup for Test Chat ---
   const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY || "" });
@@ -92,7 +93,7 @@ export default function App() {
 
     try {
       const response = await ai.models.generateContent({
-        model: "gemini-3-flash-latest",
+        model: "gemini-1.5-flash",
         contents: inputText,
         config: {
           systemInstruction: `
@@ -261,23 +262,40 @@ export default function App() {
                       <h3 className="font-bold text-lg">Active Conversations</h3>
                       <p className="text-xs text-gray-400 font-medium">Real-time from MongoDB</p>
                     </div>
-                    <div className="flex gap-2">
-                      {['all', 'whatsapp', 'instagram', 'web', 'import'].map((p) => (
-                        <button
-                          key={p}
-                          onClick={() => {
-                            setPlatformFilter(p);
+                    <div className="flex flex-col md:flex-row gap-4">
+                      <div className="relative">
+                        <input
+                          type="text"
+                          placeholder="Search Phone / ID..."
+                          value={searchQuery}
+                          onChange={(e) => {
+                            setSearchQuery(e.target.value);
                             setPagination(prev => ({ ...prev, page: 1 }));
                           }}
-                          className={`px-3 py-1 rounded-lg text-[10px] font-bold uppercase tracking-wider transition-all ${
-                            platformFilter === p 
-                              ? "bg-gray-900 text-white" 
-                              : "bg-gray-100 text-gray-500 hover:bg-gray-200"
-                          }`}
-                        >
-                          {p}
-                        </button>
-                      ))}
+                          className="pl-9 pr-4 py-1.5 bg-gray-50 border border-gray-200 rounded-xl text-xs focus:outline-none focus:ring-2 focus:ring-orange-500/20 focus:border-orange-500 transition-all w-48"
+                        />
+                        <div className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400">
+                          <User size={14} />
+                        </div>
+                      </div>
+                      <div className="flex gap-2">
+                        {['all', 'whatsapp', 'instagram', 'web', 'import'].map((p) => (
+                          <button
+                            key={p}
+                            onClick={() => {
+                              setPlatformFilter(p);
+                              setPagination(prev => ({ ...prev, page: 1 }));
+                            }}
+                            className={`px-3 py-1 rounded-lg text-[10px] font-bold uppercase tracking-wider transition-all ${
+                              platformFilter === p 
+                                ? "bg-gray-900 text-white" 
+                                : "bg-gray-100 text-gray-500 hover:bg-gray-200"
+                            }`}
+                          >
+                            {p}
+                          </button>
+                        ))}
+                      </div>
                     </div>
                   </div>
                   <div className="divide-y divide-gray-50">

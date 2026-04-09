@@ -7,6 +7,8 @@ import { GoogleGenAI } from "@google/genai";
 import dotenv from "dotenv";
 import mongoose from "mongoose";
 import cors from "cors";
+import { Chat } from "./models/Chat.ts";
+import { User } from "./models/User.ts";
 
 dotenv.config();
 
@@ -19,22 +21,6 @@ mongoose.connect(MONGODB_URI)
   .then(() => console.log("Connected to MongoDB"))
   .catch(err => console.error("MongoDB connection error:", err));
 
-const chatSchema = new mongoose.Schema({
-  userId: { type: String, index: true }, // Phone number or Social ID
-  platform: { type: String, index: true }, // 'whatsapp', 'messenger', 'instagram', 'web'
-  leadScore: { type: String, enum: ['cold', 'warm', 'hot'], default: 'cold', index: true },
-  scoreReason: String,
-  messages: [{
-    role: String, // 'user', 'model'
-    text: String,
-    timestamp: { type: Date, default: Date.now }
-  }],
-  lastUpdated: { type: Date, default: Date.now, index: true }
-});
-
-chatSchema.index({ userId: 1, platform: 1 }, { unique: true });
-
-const Chat = mongoose.model("Chat", chatSchema);
 
 // Near-zero latency context cache for active sessions
 const contextCache = new Map<string, any[]>();
@@ -89,6 +75,7 @@ async function startServer() {
       const page = parseInt(req.query.page as string) || 1;
       const limit = parseInt(req.query.limit as string) || 10;
       const platform = req.query.platform as string;
+      const search = req.query.search as string;
       const skip = (page - 1) * limit;
 
       const query: any = {};
@@ -96,17 +83,60 @@ async function startServer() {
         query.platform = platform;
       }
 
-      const total = await Chat.countDocuments(query);
+      if (search) {
+        query.$or = [
+          { userId: { $regex: search, $options: 'i' } },
+          { platform: { $regex: search, $options: 'i' } }
+        ];
+      }
+
+      // 1. Get existing chat conversations
       const chats = await Chat.find(query)
         .sort({ lastUpdated: -1 })
-        .skip(skip)
-        .limit(limit);
+        .limit(limit * 2); // Get a bit more to allow merging
+
+      // 2. Search main users collection if search is active
+      let mergedResults = [...chats];
+      if (search) {
+        const userQuery: any = {
+          $or: [
+            { name: { $regex: search, $options: 'i' } },
+            { mobile_number: { $regex: search, $options: 'i' } },
+            { email: { $regex: search, $options: 'i' } },
+            { user_id: { $regex: search, $options: 'i' } }
+          ]
+        };
+        const users = await User.find(userQuery).limit(10);
+        
+        // Add users who don't have a chat record yet
+        users.forEach((u: any) => {
+          const uId = u.mobile_number?.toString() || u.user_id;
+          const alreadyIn = mergedResults.some(c => c.userId === uId);
+          if (!alreadyIn) {
+            mergedResults.push({
+              _id: u._id,
+              userId: uId,
+              name: u.name,
+              platform: 'users_db',
+              leadScore: 'cold',
+              scoreReason: 'Full Customer Database Result',
+              messages: [],
+              lastUpdated: new Date(0) // Sort at bottom
+            } as any);
+          }
+        });
+      }
+
+      // 3. Final processing
+      const processedResults = mergedResults
+        .sort((a, b) => b.lastUpdated.getTime() - a.lastUpdated.getTime())
+        .slice(skip, skip + limit);
 
       res.json({
-        chats,
-        total,
+        chats: processedResults,
+        total: Math.max(chats.length, mergedResults.length), // Approximate total
         page,
-        totalPages: Math.ceil(total / limit)
+        totalPages: Math.ceil(mergedResults.length / limit)
       });
     } catch (error) {
       console.error("Error fetching chats:", error);
@@ -139,6 +169,7 @@ async function startServer() {
     try {
       let chat = await Chat.findOne({ userId });
       if (chat) {
+        console.log(`\n[${new Date().toLocaleTimeString()}] 💬 DASHBOARD MANUAL MESSAGE to ${userId}: "${text}"`);
         chat.messages.push({ role: 'model', text, timestamp: new Date() });
         chat.lastUpdated = new Date();
         await chat.save();
@@ -260,7 +291,10 @@ async function startServer() {
       }
 
       // 2. Add user message
-      const userMsg = { role: "user", text, timestamp: new Date() };
+      const timestamp = new Date();
+      console.log(`\n[${timestamp.toLocaleTimeString()}] 📥 INCOMING [${platform}] from ${userId}: "${text}"`);
+
+      const userMsg = { role: "user", text, timestamp };
       messages.push(userMsg);
 
       // 3. Prepare AI context (Last 10 messages for deep context)
@@ -271,27 +305,34 @@ async function startServer() {
 
       // 4. Generate AI Response
       const response = await genAI.models.generateContent({
-        model: "gemini-3-flash-latest",
+        model: process.env.GEMINI_MODEL || "gemini-3.1-flash-live-preview",
         contents: history,
         config: { systemInstruction: CARMAA_CONTEXT },
       });
 
       const aiResponse = response.text || "Bro, server thoda slow hai, ek min ruko!";
+      console.log(`[${new Date().toLocaleTimeString()}] 📤 OUTGOING [${platform}] to ${userId}: "${aiResponse.slice(0, 50)}${aiResponse.length > 50 ? '...' : ''}"`);
+      
       const modelMsg = { role: "model", text: aiResponse, timestamp: new Date() };
       messages.push(modelMsg);
 
       // 5. Update Cache (Keep last 20 in memory)
       contextCache.set(cacheKey, messages.slice(-20));
 
-      // 6. Background DB Update (Don't block the response)
       (async () => {
-        if (!chat) chat = await Chat.findOne({ userId, platform }) || new Chat({ userId, platform, messages: [] });
-        chat.messages = messages; // Full history in DB
-        const { score, reason } = calculateLeadScore(chat.messages);
-        chat.leadScore = score as any;
-        chat.scoreReason = reason;
-        chat.lastUpdated = new Date();
-        await chat.save();
+        const { score, reason } = calculateLeadScore(messages);
+        await Chat.findOneAndUpdate(
+          { userId, platform },
+          { 
+            $set: { 
+              messages, 
+              leadScore: score, 
+              scoreReason: reason, 
+              lastUpdated: new Date() 
+            } 
+          },
+          { upsert: true }
+        );
       })().catch(err => console.error("DB Update Error:", err));
 
       // 7. Platform Specific Send
