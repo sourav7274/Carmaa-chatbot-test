@@ -60,7 +60,7 @@ function calculateLeadScore(messages: any[]) {
 }
 
 // --- Date Parser (extended) ---
-function parseUserDate(text: string, inPickingDate = false): string | null {
+function parseUserDate(text: string, inDateSelection = false): string | null {
   const lower = text.toLowerCase().trim();
   const now = new Date();
 
@@ -76,7 +76,7 @@ function parseUserDate(text: string, inPickingDate = false): string | null {
     return dat.toISOString().split('T')[0];
   }
 
-  // Try parsing explicit ISO dates like "2026-05-27"
+  // ISO date: "2026-05-27"
   const iso = lower.match(/(\d{4}-\d{2}-\d{2})/);
   if (iso) return iso[1];
 
@@ -87,19 +87,21 @@ function parseUserDate(text: string, inPickingDate = false): string | null {
     july: 6, august: 7, september: 8, october: 9, november: 10, december: 11
   };
 
-  // "27 May", "5th April" etc.
-  const dateMatch = lower.match(/(\d{1,2})(?:st|nd|rd|th)?\s+([a-z]+)/);
+  // "27 May", "5th April", "5 th april", "5 th of April"
+  // \s* between number and suffix handles "5 th april" vs "5th april"
+  const dateMatch = lower.match(/(\d{1,2})\s*(?:st|nd|rd|th)?\s+(?:of\s+)?([a-z]+)/);
   if (dateMatch) {
     const day = parseInt(dateMatch[1]);
-    const month = monthNames[dateMatch[2]];
+    const monthWord = dateMatch[2];
+    const month = monthNames[monthWord];
     if (month !== undefined) {
       const year = now.getMonth() > month ? now.getFullYear() + 1 : now.getFullYear();
       return `${year}-${String(month + 1).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
     }
   }
 
-  // Extended: when in picking_date state, accept bare numbers like "13", "18", "15 ko", "15 ki slots"
-  if (inPickingDate) {
+  // Extended: when in date selection, accept bare numbers like "13", "18", "15 ko", "18?"
+  if (inDateSelection) {
     const bareDay = lower.match(/^(\d{1,2})(?:\s|$|\?|ko|ki|ka|ke|th|st|nd|rd)/);
     if (bareDay) {
       const day = parseInt(bareDay[1]);
@@ -107,7 +109,7 @@ function parseUserDate(text: string, inPickingDate = false): string | null {
         const now2 = new Date();
         let month = now2.getMonth();
         let year = now2.getFullYear();
-        // If that day has already passed this month, use next month
+        // If that day has already passed this month, move to next month
         if (day <= now2.getDate()) {
           month++;
           if (month > 11) { month = 0; year++; }
@@ -118,6 +120,14 @@ function parseUserDate(text: string, inPickingDate = false): string | null {
   }
 
   return null;
+}
+
+// Returns true if dateStr (YYYY-MM-DD) is strictly before today
+function isDateInPast(dateStr: string): boolean {
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+  const d = new Date(dateStr + 'T00:00:00');
+  return d < today;
 }
 
 function formatDateDisplay(dateStr: string): string {
@@ -924,7 +934,16 @@ PROMPT NOTE: Use the [PRIMARY] car/address. If VIP, treat them royally.`;
       let interactiveHandled = false;
       let systemMessage = "";
 
-      if (text === 'show_more_services') {
+      // Cancel Intent: if user explicitly says they don't want booking, reset draft
+      const cancelIntent = /nahi\s*chahiye|mat\s*karo|don.?t\s*want|not\s*interested|bad\s*service|choro\s*yar|chhodo|nai\s*chahiye|band\s*karo|no\s*booking|no\s*thanks|nai\s*krni|nai\s*karni/i.test(text);
+      if (cancelIntent && draft.step !== 'idle') {
+        bookingDrafts.delete(cacheKey);
+        draft = { step: 'idle' };
+        systemMessage = 'User expressed they do NOT want a booking or is unhappy. Empathize genuinely, apologize if needed, and reset completely. Do NOT mention booking or services unless they bring it up.';
+        interactiveHandled = true;
+      }
+
+      if (!interactiveHandled && text === 'show_more_services') {
         // User tapped the "See More Services" button
         const allServices = userServiceCache.get(cacheKey) || await getServicesForUser(regionId, carType);
         userServiceCache.set(cacheKey, allServices);
@@ -943,6 +962,7 @@ PROMPT NOTE: Use the [PRIMARY] car/address. If VIP, treat them royally.`;
         persistChat(userId, platform, messages);
         return ackText;
       }
+
 
       if (text.startsWith('svc_')) {
         // User picked a service from list — return early, no AI needed
@@ -1025,42 +1045,109 @@ PROMPT NOTE: Use the [PRIMARY] car/address. If VIP, treat them royally.`;
       }
 
       // ── Date Detection ─────────────────────────────────────────────────────
-      const inPickingDate = draft.step === 'picking_date';
-      if (!interactiveHandled && (inPickingDate || text.match(/today|tomorrow|kal|aaj|parso|\d{1,2}\s*(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec|\d{4})/i))) {
-        const parsedDate = parseUserDate(text, inPickingDate);
+      const inDateSelection = draft.step === 'picking_date' || draft.step === 'picking_slot';
+      if (!interactiveHandled && (inDateSelection || text.match(/today|tomorrow|kal|aaj|parso|\d{1,2}\s*(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec|\d{4})/i))) {
+        const parsedDate = parseUserDate(text, inDateSelection);
 
-        if (parsedDate && inPickingDate) {
-          // Fetch slots — may return a different (nearest) date if parsedDate has no slots
-          const { slots, actualDate } = await getAvailableSlots(regionId, parsedDate);
-
-          const dateChanged = actualDate !== parsedDate;
-          draft = { ...draft, step: 'picking_slot', date: actualDate };
-          bookingDrafts.set(cacheKey, draft);
-
-          if (isWhatsApp) {
-            if (dateChanged) {
-              await sendWhatsAppText(userId, phoneId!,
-                `Bhai, ${formatDateDisplay(parsedDate)} ke liye koi slot nahi hai. ` +
-                `Nearest available date hai *${formatDateDisplay(actualDate)}* — yeh dekho! 📅`
-              );
-            } else {
-              await sendWhatsAppText(userId, phoneId!, `Okay! ${formatDateDisplay(actualDate)} ke liye slot dhundta hoon... 🔍`);
-            }
-            await sendWhatsAppSlotButtons(userId, phoneId!, slots, actualDate);
+        if (parsedDate) {
+          // Reject past dates immediately
+          if (isDateInPast(parsedDate)) {
+            const pastMsg = `Bhai, ${formatDateDisplay(parsedDate)} toh already guzar gayi! 😅 Time machine nahi hai humara. Future date batao — kab chahiye?`;
+            if (isWhatsApp) await sendWhatsAppText(userId, phoneId!, pastMsg);
+            messages.push({ role: 'user', text, timestamp });
+            messages.push({ role: 'model', text: pastMsg, timestamp: new Date() });
+            contextCache.set(cacheKey, messages.slice(-20));
+            persistChat(userId, platform, messages);
+            return pastMsg;
           }
 
-          const slotMsg = slots.length > 0
-            ? `Available slots for ${actualDate}: ${slots.join(', ')}`
-            : `No slots available anywhere near ${parsedDate}.`;
-          messages.push({ role: 'user', text, timestamp });
-          messages.push({ role: 'model', text: slotMsg, timestamp: new Date() });
-          contextCache.set(cacheKey, messages.slice(-20));
-          persistChat(userId, platform, messages);
-          return slotMsg;
+          if (inDateSelection) {
+            // Fetch slots — DON'T auto-jump to nearest, ask user instead
+            const regionQuery: any = { date: parsedDate, weeklyOff: { $ne: true } };
+            if (regionId && mongoose.Types.ObjectId.isValid(regionId)) {
+              regionQuery.region = new mongoose.Types.ObjectId(regionId);
+            }
+            let exactDoc = await AvailableSlots.findOne(regionQuery).lean() as any
+              || await AvailableSlots.findOne({ date: parsedDate, weeklyOff: { $ne: true } }).lean() as any;
 
-        } else if (inPickingDate && !parsedDate) {
-          // In picking_date but couldn't understand the date — ask again directly, DO NOT call Ollama
-          const nudge = `Bhai, date samajh nahi aaya! 😅 Koi specific date batao:\n- "kal" (tomorrow)\n- "29 April"\n- "2026-04-29"\nKab chahiye service?`;
+            if (!exactDoc) {
+              // No slots on this exact date — ask user if they want nearest available
+              const nearestDoc = await AvailableSlots.findOne({
+                date: { $gt: parsedDate }, weeklyOff: { $ne: true }
+              }).sort({ date: 1 }).lean() as any;
+
+              if (nearestDoc) {
+                // Offer nearest with confirmation
+                const offerMsg = `Bhai, *${formatDateDisplay(parsedDate)}* ke liye koi slot nahi hai (holiday ya off day). ` +
+                  `Nearest available date hai *${formatDateDisplay(nearestDoc.date)}*. ` +
+                  `Kya us din book karein? 📅`;
+                if (isWhatsApp) await sendWhatsAppText(userId, phoneId!, offerMsg);
+                // Prime the draft with the nearest date so if they confirm with any positive, use it
+                draft = { ...draft, step: 'picking_date', _suggestedDate: nearestDoc.date };
+                bookingDrafts.set(cacheKey, draft);
+                messages.push({ role: 'user', text, timestamp });
+                messages.push({ role: 'model', text: offerMsg, timestamp: new Date() });
+                contextCache.set(cacheKey, messages.slice(-20));
+                persistChat(userId, platform, messages);
+                return offerMsg;
+              } else {
+                const noSlotMsg = `Bhai, ${formatDateDisplay(parsedDate)} ke baad bhi koi date available nahi dikh raha. Please humein call karein! 📞`;
+                if (isWhatsApp) await sendWhatsAppText(userId, phoneId!, noSlotMsg);
+                return noSlotMsg;
+              }
+            }
+
+            // Exact date has slots — filter and show
+            const slotsRaw: string[] = (exactDoc.timeSlots || [])
+              .filter((s: any) => !s.maxLimit || s.bookingCount < s.maxLimit)
+              .map((s: any) => s.time);
+
+            // Same-day 2-hour buffer
+            const todayStr = new Date().toISOString().split('T')[0];
+            let slots = slotsRaw;
+            if (parsedDate === todayStr) {
+              const now = new Date();
+              const cutoff = new Date(now.getTime() + 2 * 60 * 60 * 1000);
+              const cutoffH = cutoff.getHours(), cutoffM = cutoff.getMinutes();
+              slots = slotsRaw.filter(t => {
+                const m2 = t.split('-')[0]?.trim().match(/(\d{1,2}):(\d{2})\s*(AM|PM)/i);
+                if (!m2) return false;
+                let h = parseInt(m2[1]); const mn = parseInt(m2[2]); const p = m2[3].toUpperCase();
+                if (p === 'PM' && h !== 12) h += 12;
+                if (p === 'AM' && h === 12) h = 0;
+                return h > cutoffH || (h === cutoffH && mn >= cutoffM);
+              });
+            }
+
+            if (slots.length === 0) {
+              const noTimeMsg = `Bhai, ${formatDateDisplay(parsedDate)} ke liye koi slot abhi available nahi. Koi aur date try karo? 🙏`;
+              if (isWhatsApp) await sendWhatsAppText(userId, phoneId!, noTimeMsg);
+              messages.push({ role: 'user', text, timestamp });
+              messages.push({ role: 'model', text: noTimeMsg, timestamp: new Date() });
+              contextCache.set(cacheKey, messages.slice(-20));
+              persistChat(userId, platform, messages);
+              return noTimeMsg;
+            }
+
+            draft = { ...draft, step: 'picking_slot', date: parsedDate };
+            bookingDrafts.set(cacheKey, draft);
+
+            if (isWhatsApp) {
+              await sendWhatsAppText(userId, phoneId!, `Okay! ${formatDateDisplay(parsedDate)} ke liye slot dhundta hoon... 🔍`);
+              await sendWhatsAppSlotButtons(userId, phoneId!, slots, parsedDate);
+            }
+
+            const slotMsg = `Available slots for ${parsedDate}: ${slots.join(', ')}`;
+            messages.push({ role: 'user', text, timestamp });
+            messages.push({ role: 'model', text: slotMsg, timestamp: new Date() });
+            contextCache.set(cacheKey, messages.slice(-20));
+            persistChat(userId, platform, messages);
+            return slotMsg;
+          }
+
+        } else if (inDateSelection && !parsedDate) {
+          // Couldn't parse — ask again, DO NOT call Ollama
+          const nudge = `Bhai, date samajh nahi aaya! 😅 Yeh try karo:\n- "kal" (tomorrow)\n- "29 April"\n- "2026-04-29"\nKab chahiye service?`;
           if (isWhatsApp) await sendWhatsAppText(userId, phoneId!, nudge);
           messages.push({ role: 'user', text, timestamp });
           messages.push({ role: 'model', text: nudge, timestamp: new Date() });
@@ -1070,9 +1157,20 @@ PROMPT NOTE: Use the [PRIMARY] car/address. If VIP, treat them royally.`;
         }
       }
 
-      // Guard: if in any booking step, prevent Ollama from hallucinating booking confirmations
-      if (['picking_service', 'picking_date', 'picking_slot', 'confirming'].includes(draft.step)) {
-        // Still in flow — make sure Ollama knows the current step explicitly
+      // ── picking_slot guard: if user sends text (not a slot tap), re-show slot widget ────────
+      if (!interactiveHandled && draft.step === 'picking_slot' && draft.date && draft.slotMap) {
+        // User is supposed to tap a slot, not type text — re-send the slot widget
+        const { slots } = await getAvailableSlots(regionId, draft.date);
+        if (isWhatsApp && slots.length > 0) {
+          await sendWhatsAppText(userId, phoneId!, `Bhai, slot select karo na! 😄 Yeh dekho:`);
+          await sendWhatsAppSlotButtons(userId, phoneId!, slots, draft.date);
+          messages.push({ role: 'user', text, timestamp });
+          const msg2 = `Re-sent slot widget for ${draft.date}`;
+          messages.push({ role: 'model', text: msg2, timestamp: new Date() });
+          contextCache.set(cacheKey, messages.slice(-20));
+          persistChat(userId, platform, messages);
+          return msg2;
+        }
       }
 
       // ── Fetch Services & Send Widget ───────────────────────────────────────
