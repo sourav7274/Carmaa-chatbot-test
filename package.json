@@ -14,11 +14,13 @@
   "dependencies": {
     "@google/genai": "^1.48.0",
     "@tailwindcss/vite": "^4.1.14",
+    "@types/jsonwebtoken": "^9.0.10",
     "@vitejs/plugin-react": "^5.0.4",
     "axios": "^1.14.0",
     "cors": "^2.8.6",
     "dotenv": "^17.2.3",
     "express": "^4.21.2",
+    "jsonwebtoken": "^9.0.3",
     "lucide-react": "^0.546.0",
     "mongoose": "^9.4.1",
     "motion": "^12.23.24",
