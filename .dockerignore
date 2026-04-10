@@ -1,0 +1,11 @@
+node_modules
+dist
+.env
+.git
+.gitignore
+scratch
+venv
+*.log
+kubernetes
+docker-compose*.yml
+Dockerfile

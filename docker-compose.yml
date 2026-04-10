@@ -1,0 +1,53 @@
+version: '3.8'
+
+services:
+  carmaa-ai:
+    build: .
+    container_name: carmaa-ai
+    restart: always
+    ports:
+      - "3000:3000"
+    environment:
+      # Use the internal docker network hostname "ollama"
+      - OLLAMA_BASE_URL=http://ollama:11434
+      - OLLAMA_MODEL=gemma:2b
+      - PORT=3000
+    env_file:
+      - .env
+    depends_on:
+      - ollama
+
+  ollama:
+    image: ollama/ollama:latest
+    container_name: ollama
+    restart: always
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama_data:/root/.ollama
+    # If the EC2 instance has a GPU and Nvidia Container Toolkit is installed, 
+    # uncomment the below block to give Ollama GPU access:
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - driver: nvidia
+    #           count: 1
+    #           capabilities: [gpu]
+
+  ngrok:
+    image: ngrok/ngrok:latest
+    container_name: ngrok
+    restart: always
+    ports:
+      - "4040:4040"
+    environment:
+      - NGROK_AUTHTOKEN=${NGROK_AUTHTOKEN}
+    # If using a free static domain on Ngrok, change the command below:
+    # command: "http --domain=your-custom-domain.ngrok-free.app carmaa-ai:3000"
+    command: "http carmaa-ai:3000"
+    depends_on:
+      - carmaa-ai
+
+volumes:
+  ollama_data:
