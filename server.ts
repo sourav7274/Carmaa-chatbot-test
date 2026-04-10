@@ -3,7 +3,6 @@ import { createServer as createViteServer } from "vite";
 import path from "path";
 import { fileURLToPath } from "url";
 import axios from "axios";
-import { GoogleGenAI } from "@google/genai";
 import dotenv from "dotenv";
 import mongoose from "mongoose";
 import cors from "cors";
@@ -60,8 +59,8 @@ function calculateLeadScore(messages: any[]) {
   return { score, reason };
 }
 
-// --- Date Parser ---
-function parseUserDate(text: string): string | null {
+// --- Date Parser (extended) ---
+function parseUserDate(text: string, inPickingDate = false): string | null {
   const lower = text.toLowerCase().trim();
   const now = new Date();
 
@@ -77,7 +76,7 @@ function parseUserDate(text: string): string | null {
     return dat.toISOString().split('T')[0];
   }
 
-  // Try parsing explicit dates like "27 May", "5th April", "2026-05-27"
+  // Try parsing explicit ISO dates like "2026-05-27"
   const iso = lower.match(/(\d{4}-\d{2}-\d{2})/);
   if (iso) return iso[1];
 
@@ -87,6 +86,8 @@ function parseUserDate(text: string): string | null {
     january: 0, february: 1, march: 2, april: 3, june: 5,
     july: 6, august: 7, september: 8, october: 9, november: 10, december: 11
   };
+
+  // "27 May", "5th April" etc.
   const dateMatch = lower.match(/(\d{1,2})(?:st|nd|rd|th)?\s+([a-z]+)/);
   if (dateMatch) {
     const day = parseInt(dateMatch[1]);
@@ -94,6 +95,25 @@ function parseUserDate(text: string): string | null {
     if (month !== undefined) {
       const year = now.getMonth() > month ? now.getFullYear() + 1 : now.getFullYear();
       return `${year}-${String(month + 1).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
+    }
+  }
+
+  // Extended: when in picking_date state, accept bare numbers like "13", "18", "15 ko", "15 ki slots"
+  if (inPickingDate) {
+    const bareDay = lower.match(/^(\d{1,2})(?:\s|$|\?|ko|ki|ka|ke|th|st|nd|rd)/);
+    if (bareDay) {
+      const day = parseInt(bareDay[1]);
+      if (day >= 1 && day <= 31) {
+        const now2 = new Date();
+        let month = now2.getMonth();
+        let year = now2.getFullYear();
+        // If that day has already passed this month, use next month
+        if (day <= now2.getDate()) {
+          month++;
+          if (month > 11) { month = 0; year++; }
+        }
+        return `${year}-${String(month + 1).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
+      }
     }
   }
 
@@ -365,11 +385,40 @@ async function startServer() {
         return { slots: [], actualDate: dateStr };
       }
 
-      const available = (slotDoc.timeSlots || [])
+      // Filter by capacity
+      let available: string[] = (slotDoc.timeSlots || [])
         .filter((s: any) => !s.maxLimit || s.bookingCount < s.maxLimit)
         .map((s: any) => s.time);
 
-      console.log(`[Slots] ${available.length} slots for ${slotDoc.date}: ${available.slice(0, 3).join(', ')}...`);
+      // Same-day booking: apply 2-hour buffer from current time
+      const today = new Date().toISOString().split('T')[0];
+      if (slotDoc.date === today) {
+        const now = new Date();
+        const bufferMs = 2 * 60 * 60 * 1000; // 2 hours
+        const cutoff = new Date(now.getTime() + bufferMs);
+        const cutoffH = cutoff.getHours();
+        const cutoffM = cutoff.getMinutes();
+
+        available = available.filter(slotTime => {
+          // Slot format: "9:00 AM - 10:00 AM" or "10:00 AM - 11:00 AM"
+          // Parse start time of the slot
+          const startPart = slotTime.split('-')[0]?.trim();
+          if (!startPart) return false;
+          const match = startPart.match(/(\d{1,2}):(\d{2})\s*(AM|PM)/i);
+          if (!match) return false;
+          let h = parseInt(match[1]);
+          const m = parseInt(match[2]);
+          const period = match[3].toUpperCase();
+          if (period === 'PM' && h !== 12) h += 12;
+          if (period === 'AM' && h === 12) h = 0;
+          // Keep only slots whose start time is >= cutoff
+          return h > cutoffH || (h === cutoffH && m >= cutoffM);
+        });
+
+        console.log(`[Slots] Same-day filter: cutoff ${cutoffH}:${String(cutoffM).padStart(2,'0')} → ${available.length} slots remaining`);
+      }
+
+      console.log(`[Slots] ${available.length} slots for ${slotDoc.date}`);
       return { slots: available, actualDate: slotDoc.date };
     } catch (err) {
       console.error('[Slots] Error fetching slots:', err);
@@ -607,32 +656,52 @@ PROMPT NOTE: Use the [PRIMARY] car/address. If VIP, treat them royally.`;
   }
 
   async function sendWhatsAppSlotButtons(to: string, phoneId: string, slots: string[], dateStr: string) {
-    const displayed = slots.slice(0, 3);
     const dateDisplay = formatDateDisplay(dateStr);
 
-    if (displayed.length === 0) {
+    if (slots.length === 0) {
       await sendWhatsAppText(to, phoneId, `Bhai, ${dateDisplay} ke liye koi slot available nahi hai. Koi aur din try karo? 🙏`);
       return;
     }
 
-    const buttons = displayed.map(t => ({
-      type: "reply",
-      reply: { id: `slot_${t}`, title: t }
+    // Cap at 10 (WhatsApp list row limit per section)
+    const displayed = slots.slice(0, 10);
+
+    // Store slot index → actual slot time mapping in draft
+    const slotMap = Object.fromEntries(displayed.map((t, i) => [`slot_${i}`, t]));
+    const cacheKey = `whatsapp:${to}`;
+    const draft = bookingDrafts.get(cacheKey) || {};
+    bookingDrafts.set(cacheKey, { ...draft, slotMap });
+
+    // Build list rows — title max 24 chars, description max 72 chars
+    const rows = displayed.map((t, i) => ({
+      id: `slot_${i}`,
+      title: t.length > 24 ? t.slice(0, 24) : t,
+      description: `Tap to book this slot`
     }));
 
-    let bodyText = `📅 *${dateDisplay}* ke available slots:\n\nKaunsa time suit karega? 🕐`;
-    if (slots.length > 3) bodyText += `\n\n(+${slots.length - 3} more slots available)`;
+    const bodyText = `📅 *${dateDisplay}* ke available slots (${displayed.length}${slots.length > 10 ? `/${slots.length}` : ''}):\n\nKaunsa time suit karega? 🕐`;
+    const footerText = slots.length > 10 ? `Showing first 10 of ${slots.length} slots` : `${slots.length} slot${slots.length === 1 ? '' : 's'} available`;
 
-    await axios.post(`https://graph.facebook.com/v17.0/${phoneId}/messages`, {
-      messaging_product: "whatsapp",
-      to,
-      type: "interactive",
-      interactive: {
-        type: "button",
-        body: { text: bodyText },
-        action: { buttons }
-      }
-    }, { headers: { Authorization: `Bearer ${process.env.WHATSAPP_TOKEN}` } });
+    try {
+      await axios.post(`https://graph.facebook.com/v17.0/${phoneId}/messages`, {
+        messaging_product: "whatsapp",
+        to,
+        type: "interactive",
+        interactive: {
+          type: "list",
+          header: { type: "text", text: "⏰ Choose Your Slot" },
+          body: { text: bodyText },
+          footer: { text: footerText },
+          action: {
+            button: "Pick a Slot",
+            sections: [{ title: "Available Time Slots", rows }]
+          }
+        }
+      }, { headers: { Authorization: `Bearer ${process.env.WHATSAPP_TOKEN}` } });
+      console.log(`[Slots] ✅ Slot list widget sent to ${to} for ${dateStr} (${displayed.length} slots shown)`);
+    } catch (err: any) {
+      console.error(`[Slots] ❌ Failed to send slot widget:`, err.response?.data || err.message);
+    }
   }
 
   async function sendWhatsAppConfirmation(to: string, phoneId: string, draft: any, user: any) {
@@ -658,9 +727,6 @@ PROMPT NOTE: Use the [PRIMARY] car/address. If VIP, treat them royally.`;
       }
     }, { headers: { Authorization: `Bearer ${process.env.WHATSAPP_TOKEN}` } });
   }
-
-  // --- Gemini Setup ---
-  const genAI = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY || "" });
 
   const CARMAA_CONTEXT = `
     You are "Carmaa Bro", the chillest AI Sales Rep for Carmaa (premium door-to-door car service in India).
@@ -696,6 +762,36 @@ PROMPT NOTE: Use the [PRIMARY] car/address. If VIP, treat them royally.`;
     - First booking? CARMAA20 for 20% off. "Pehli baar, toh discount banta hai!"
     - Refer a friend? ₹200 off. "Dost ka bhala, aapka bhi bhala."
   `;
+
+  // --- Ollama Client ---
+  async function callOllama(messages: any[], systemInstruction: string): Promise<string> {
+    const model = process.env.OLLAMA_MODEL || 'gemma:2b';
+    const baseUrl = process.env.OLLAMA_BASE_URL || 'http://localhost:11434';
+
+    try {
+      // Map history to Ollama format: [{ role, content }]
+      const formattedMessages = [
+        { role: 'system', content: systemInstruction },
+        ...messages.map(m => ({
+          role: m.role === 'user' ? 'user' : 'assistant',
+          content: m.text
+        }))
+      ];
+
+      const response = await axios.post(`${baseUrl}/api/chat`, {
+        model,
+        messages: formattedMessages,
+        stream: false
+      });
+
+      return response.data?.message?.content || "Bro, Ollama ne jawaab nahi diya! 😅";
+    } catch (err: any) {
+      console.error('[Ollama] ❌ Error:', err.message);
+      return "Sorry bro, local AI thoda load nahi le pa raha! 🙏";
+    }
+  }
+
+  // --- Gemini Setup removed ---
 
   // --- Webhook ---
   app.get("/webhook", (req, res) => {
@@ -875,8 +971,9 @@ PROMPT NOTE: Use the [PRIMARY] car/address. If VIP, treat them royally.`;
         // Service not found — fall through to AI
         interactiveHandled = true;
       } else if (text.startsWith('slot_')) {
-        // User picked a time slot
-        const time = text.replace('slot_', '');
+        // User tapped a time slot button — look up actual time from slotMap
+        const slotMap = draft.slotMap || {};
+        const time = slotMap[text] || text.replace('slot_', ''); // fallback to raw time
         draft = { ...draft, step: 'confirming', time };
         bookingDrafts.set(cacheKey, draft);
 
@@ -891,6 +988,7 @@ PROMPT NOTE: Use the [PRIMARY] car/address. If VIP, treat them royally.`;
         }
         systemMessage = `User picked time slot: ${time}. Show them a confirmation summary and ask to confirm.`;
         interactiveHandled = true;
+
 
       } else if (text === 'confirm_booking') {
         // User confirmed booking
@@ -927,10 +1025,11 @@ PROMPT NOTE: Use the [PRIMARY] car/address. If VIP, treat them royally.`;
       }
 
       // ── Date Detection ─────────────────────────────────────────────────────
-      if (!interactiveHandled && (draft.step === 'picking_date' || text.match(/today|tomorrow|kal|aaj|parso|\d{1,2}\s*(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec|\d{4})/i))) {
-        const parsedDate = parseUserDate(text);
-        if (parsedDate && draft.step === 'picking_date') {
+      const inPickingDate = draft.step === 'picking_date';
+      if (!interactiveHandled && (inPickingDate || text.match(/today|tomorrow|kal|aaj|parso|\d{1,2}\s*(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec|\d{4})/i))) {
+        const parsedDate = parseUserDate(text, inPickingDate);
 
+        if (parsedDate && inPickingDate) {
           // Fetch slots — may return a different (nearest) date if parsedDate has no slots
           const { slots, actualDate } = await getAvailableSlots(regionId, parsedDate);
 
@@ -940,7 +1039,6 @@ PROMPT NOTE: Use the [PRIMARY] car/address. If VIP, treat them royally.`;
 
           if (isWhatsApp) {
             if (dateChanged) {
-              // Date was shifted to nearest available — tell user
               await sendWhatsAppText(userId, phoneId!,
                 `Bhai, ${formatDateDisplay(parsedDate)} ke liye koi slot nahi hai. ` +
                 `Nearest available date hai *${formatDateDisplay(actualDate)}* — yeh dekho! 📅`
@@ -953,15 +1051,29 @@ PROMPT NOTE: Use the [PRIMARY] car/address. If VIP, treat them royally.`;
 
           const slotMsg = slots.length > 0
             ? `Available slots for ${actualDate}: ${slots.join(', ')}`
-            : `No slots available anywhere near ${parsedDate}. Ask user to contact support or check back later.`;
+            : `No slots available anywhere near ${parsedDate}.`;
           messages.push({ role: 'user', text, timestamp });
           messages.push({ role: 'model', text: slotMsg, timestamp: new Date() });
           contextCache.set(cacheKey, messages.slice(-20));
           persistChat(userId, platform, messages);
           return slotMsg;
+
+        } else if (inPickingDate && !parsedDate) {
+          // In picking_date but couldn't understand the date — ask again directly, DO NOT call Ollama
+          const nudge = `Bhai, date samajh nahi aaya! 😅 Koi specific date batao:\n- "kal" (tomorrow)\n- "29 April"\n- "2026-04-29"\nKab chahiye service?`;
+          if (isWhatsApp) await sendWhatsAppText(userId, phoneId!, nudge);
+          messages.push({ role: 'user', text, timestamp });
+          messages.push({ role: 'model', text: nudge, timestamp: new Date() });
+          contextCache.set(cacheKey, messages.slice(-20));
+          persistChat(userId, platform, messages);
+          return nudge;
         }
       }
 
+      // Guard: if in any booking step, prevent Ollama from hallucinating booking confirmations
+      if (['picking_service', 'picking_date', 'picking_slot', 'confirming'].includes(draft.step)) {
+        // Still in flow — make sure Ollama knows the current step explicitly
+      }
 
       // ── Fetch Services & Send Widget ───────────────────────────────────────
       const wantsServices = /service|book|wash|clean|detail|menu|what.*offer|kya.*milega|packages?|show more|aur.*dikhao|more service/i.test(text);
@@ -1011,26 +1123,15 @@ CURRENT BOOKING DRAFT:
 ` : '';
 
       // Add to history — use systemMessage if interactive was handled
-      const userText = interactiveHandled ? systemMessage : text;
-      messages.push({ role: "user", text: interactiveHandled ? text : text, timestamp });
-
-      const history = messages.slice(-10).map(m => ({
-        role: m.role === "user" ? "user" : "model",
-        parts: [{ text: m.text }]
-      }));
+      // Add to history
+      messages.push({ role: "user", text, timestamp });
 
       const aiStart = performance.now();
-      const response = await genAI.models.generateContent({
-        model: process.env.GEMINI_MODEL || "gemini-1.5-flash",
-        contents: history,
-        config: {
-          systemInstruction: CARMAA_CONTEXT + "\n\n" + dynamicKnowledge + draftContext
-            + (interactiveHandled ? `\n\nSYSTEM NOTE: ${systemMessage}` : '')
-        },
-      });
+      const aiResponse = await callOllama(messages.slice(-10), 
+        CARMAA_CONTEXT + "\n\n" + dynamicKnowledge + draftContext
+        + (interactiveHandled ? `\n\nSYSTEM NOTE: ${systemMessage}` : '')
+      );
       const aiDuration = ((performance.now() - aiStart) / 1000).toFixed(2);
-
-      const aiResponse = response.text || "Bro, server thoda slow hai, ek min ruko!";
       const totalDuration = ((performance.now() - start) / 1000).toFixed(2);
 
       console.log(`[${new Date().toLocaleTimeString()}] 📤 OUTGOING [${platform}] to ${userId}: "${aiResponse.slice(0, 60)}..."`);
