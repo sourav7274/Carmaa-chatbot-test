@@ -773,13 +773,14 @@ PROMPT NOTE: Use the [PRIMARY] car/address. If VIP, treat them royally.`;
     - Refer a friend? ₹200 off. "Dost ka bhala, aapka bhi bhala."
   `;
 
-  // --- Ollama Client ---
-  async function callOllama(messages: any[], systemInstruction: string): Promise<string> {
-    const model = process.env.OLLAMA_MODEL || 'gemma:2b';
-    const baseUrl = process.env.OLLAMA_BASE_URL || 'http://localhost:11434';
-
+  // --- AI Client: Ollama (primary, local) → Gemini (fallback, cloud) ---
+  async function callAI(messages: any[], systemInstruction: string): Promise<string> {
+    // 1. Try Ollama (local)
+    // Use 127.0.0.1 instead of localhost because Node 18+ resolves localhost to IPv6 (::1) first,
+    // which causes ECONNREFUSED if Ollama is only listening on IPv4.
+    const ollamaUrl = process.env.OLLAMA_BASE_URL || 'http://127.0.0.1:11434';
+    const ollamaModel = process.env.OLLAMA_MODEL || 'gemma:2b';
     try {
-      // Map history to Ollama format: [{ role, content }]
       const formattedMessages = [
         { role: 'system', content: systemInstruction },
         ...messages.map(m => ({
@@ -787,21 +788,51 @@ PROMPT NOTE: Use the [PRIMARY] car/address. If VIP, treat them royally.`;
           content: m.text
         }))
       ];
-
-      const response = await axios.post(`${baseUrl}/api/chat`, {
-        model,
+      const res = await axios.post(`${ollamaUrl}/api/chat`, {
+        model: ollamaModel,
         messages: formattedMessages,
         stream: false
-      });
-
-      return response.data?.message?.content || "Bro, Ollama ne jawaab nahi diya! 😅";
+      }, { timeout: 45000 }); // 45s timeout — first load into VRAM takes time
+      const reply = res.data?.message?.content;
+      if (reply) {
+        console.log(`[AI] ✅ Ollama (${ollamaModel}) response received.`);
+        return reply;
+      }
     } catch (err: any) {
-      console.error('[Ollama] ❌ Error:', err.message);
-      return "Sorry bro, local AI thoda load nahi le pa raha! 🙏";
+      console.warn(`[AI] ⚠️  Ollama unavailable (${err.code || err.message}) — falling back to Gemini`);
     }
+
+    // 2. Fallback: Gemini API
+    try {
+      const apiKey = process.env.GEMINI_API_KEY;
+      if (!apiKey || apiKey.length < 10) {
+         // This prevents the SDK from hanging while looking for Google Cloud Default Credentials
+         throw new Error("GEMINI_API_KEY is missing or invalid in environment.");
+      }
+
+      const { GoogleGenAI } = await import('@google/genai');
+      const genAI = new GoogleGenAI({ apiKey });
+      const history = messages.slice(-10).map(m => ({
+        role: m.role === 'user' ? 'user' : 'model',
+        parts: [{ text: m.text }]
+      }));
+      const response = await genAI.models.generateContent({
+        model: process.env.GEMINI_MODEL || 'gemini-1.5-flash',
+        contents: history,
+        config: { systemInstruction }
+      });
+      const reply = response.text;
+      if (reply) {
+        console.log(`[AI] ✅ Gemini fallback (${process.env.GEMINI_MODEL || 'gemini-1.5-flash'})`);
+        return reply;
+      }
+    } catch (err: any) {
+      console.error('[AI] ❌ Gemini also failed:', err.message);
+    }
+
+    return "Bro, AI thoda busy hai abhi! Ek min mein dobara try karo. 🙏";
   }
 
-  // --- Gemini Setup removed ---
 
   // --- Webhook ---
   app.get("/webhook", (req, res) => {
@@ -1225,7 +1256,7 @@ CURRENT BOOKING DRAFT:
       messages.push({ role: "user", text, timestamp });
 
       const aiStart = performance.now();
-      const aiResponse = await callOllama(messages.slice(-10), 
+      const aiResponse = await callAI(messages.slice(-10), 
         CARMAA_CONTEXT + "\n\n" + dynamicKnowledge + draftContext
         + (interactiveHandled ? `\n\nSYSTEM NOTE: ${systemMessage}` : '')
       );
@@ -1355,7 +1386,7 @@ CURRENT BOOKING DRAFT:
     `);
   });
 
-  // --- Vite Middleware ---
+  // --- Vite Middleware (local dev only) ---
   if (process.env.NODE_ENV !== "production") {
     const vite = await createViteServer({
       server: { middlewareMode: true },
@@ -1363,16 +1394,44 @@ CURRENT BOOKING DRAFT:
     });
     app.use(vite.middlewares);
   } else {
-    const distPath = path.join(__dirname, "dist");
-    app.use(express.static(distPath));
-    app.get("*", (req, res) => res.sendFile(path.join(distPath, "index.html")));
+    // In production (Vercel), static files are served by Vercel CDN from /dist
+    // Only serve locally built dist if not on Vercel
+    if (!process.env.VERCEL) {
+      const distPath = path.join(__dirname, "dist");
+      app.use(express.static(distPath));
+      app.get("*", (req, res) => res.sendFile(path.join(distPath, "index.html")));
+    }
   }
 
-  app.listen(PORT, "0.0.0.0", () => {
-    console.log(`🚀 Carmaa AI Server running on http://localhost:${PORT}`);
-  });
+  return app;
 }
 
-startServer().catch(err => {
-  console.error("Failed to start server:", err);
-});
+// --- Vercel Serverless Export ---
+// Vercel calls this file as a module and uses the exported handler.
+// Local dev falls through to app.listen() below.
+let _app: any;
+
+async function getApp() {
+  if (!_app) {
+    _app = await startServer();
+  }
+  return _app;
+}
+
+// Default export for Vercel (serverless handler)
+export default async function handler(req: any, res: any) {
+  const app = await getApp();
+  app(req, res);
+}
+
+// Local dev: listen on PORT
+if (!process.env.VERCEL) {
+  const PORT = parseInt(process.env.PORT || "3000");
+  getApp().then(app => {
+    app.listen(PORT, "0.0.0.0", () => {
+      console.log(`🚀 Carmaa AI Server running on http://localhost:${PORT}`);
+    });
+  }).catch(err => {
+    console.error("Failed to start server:", err);
+  });
+}
