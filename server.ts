@@ -13,8 +13,8 @@ import { Booking } from "./models/Booking.ts";
 import { CarModel } from "./models/CarModel.ts";
 import { AvailableSlots } from "./models/AvailableSlots.ts";
 import { City } from "./models/City.ts";
-import { Service } from "./models/Service.ts";
 import { Prerequisites } from "./models/Prerequisites.ts";
+import { WhatIncludes } from "./models/WhatIncludes.ts";
 
 dotenv.config();
 
@@ -382,8 +382,8 @@ async function startServer() {
 
       let whatIncludes: string[] = [];
       if (service.whatIncludes && service.whatIncludes.length > 0) {
-        const whatIncludesDocs = await Service.find({ _id: { $in: service.whatIncludes } }).lean();
-        whatIncludes = whatIncludesDocs.map((w: any) => w.name).filter(Boolean);
+        const whatIncludesDocs = await WhatIncludes.find({ _id: { $in: service.whatIncludes } }).lean();
+        whatIncludes = whatIncludesDocs.map((w: any) => w.title).filter(Boolean);
       }
 
       return {
@@ -784,12 +784,12 @@ PROMPT NOTE: Use the [PRIMARY] car/address. If VIP, treat them royally.`;
 
   async function sendServiceDetailsMessage(to: string, phoneId: string, details: any) {
     let message = `*${details.name}*\n\n`;
-    message += `💰 *Price:* ₹${details.finalPrice}`;
+    message += `*Price:* Rs.${details.finalPrice}`;
     if (details.discount > 0) {
-      message += ` (₹${details.discount} off)`;
+      message += ` (Rs.${details.discount} off)`;
     }
     message += `\n`;
-    message += `⏱️ *Time:* ${details.time}\n\n`;
+    message += `*Time:* ${details.time}\n\n`;
 
     if (details.whatIncludes && details.whatIncludes.length > 0) {
       message += `*What's Included:*\n`;
@@ -807,7 +807,7 @@ PROMPT NOTE: Use the [PRIMARY] car/address. If VIP, treat them royally.`;
       message += `\n`;
     }
 
-    message += `Ready to book? Just say "book" or tell me when you want it!`;
+    message += `Service details upar diye hain. Agar sawaal hain toh puchiye!`;
 
     await sendWhatsAppText(to, phoneId, message);
   }
@@ -815,50 +815,45 @@ PROMPT NOTE: Use the [PRIMARY] car/address. If VIP, treat them royally.`;
   const CARMAA_CONTEXT = `
     You are a friendly and professional sales representative from Carmaa Car Care (premium door-to-door car service in India).
     
-    Language:
-    - ALWAYS speak in Hinglish (mix of Hindi and English) - this is mandatory.
-    - Write Hindi words in Roman script (like "namaste", "chahiye", "kitna", "bhai", "gaadi", "chamkani").
-    - Use simple, natural Hinglish that Indian users are comfortable with.
+    Language - VERY IMPORTANT:
+    - You MUST respond ONLY in Hinglish (Hindi written in Roman script + English).
+    - NEVER respond in pure English. Every message must have Hinglish.
+    - Examples of correct Hinglish:
+      * "Namaste bhai, kaise help kar sakta hoon?"
+      * "Gaadi chamkani hai kya?"
+      * "Rs. 1000 hai yeh service"
+      * "Kab chahiye?"
+      * "Booking ho gayi!"
+    - Examples of WRONG English:
+      * "Hello, how can I help you?" (use "Namaste, kaise help kar sakta hoon?")
+      * "The price is Rs.1000" (use "Rs.1000 hai price")
     
     Vibe:
     - Speak like a real person from Carmaa - not an AI bot.
     - Be helpful, warm and professional.
-    - Use 1-2 emojis maximum per message only when appropriate.
-    - Treat the user like a valued customer — goal is BOOKING.
+    - Use 1 emoji max per message only if really needed.
     - Keep it SHORT. WhatsApp users don't read long messages.
-    - NEVER say you are an AI or bot. You are a human representative from Carmaa.
+    - NEVER say you are an AI or bot. You are a human from Carmaa.
     
-    BOOKING FLOW RULES (follow strictly):
-    1. When user wants to book → say you'll show them the services menu (the system will send a widget automatically).
-    2. After service selected → ask WHEN they want it. Say "Kab chahiye?"
-    3. After date given → confirm the date back to user ("Okay, [date] ke liye slot dhundta hoon!") — system handles slot widget.
-    4. After slot selected → system will show confirmation — just stay ready.
-    5. After confirmed → say "Booking ho gayi! Our team will reach you on time."
-    6. After cancelled → "No problem! Jab bhi ready ho, batao." and reset.
+    CORE RULES:
+    1. NEVER list services or show extra options unless user explicitly asks.
+    2. When user asks about a service, give details directly. Don't add "here are some popular services" or similar extra content.
+    3. When user asks "what's included", tell them exactly what's included.
+    4. Don't be pushy about booking. Let user ask when ready.
+    5. If user asks for details or information, give just that - no upselling.
     
-    SERVICE DETAILS FLOW:
-    - When user asks for service details ("kya details hain", "show details", "service details", "kitne options hain"):
-      1. Acknowledge: "Dekho sab services!"
-      2. System will show service list widget automatically
-      3. After user picks a service, show full details in text including:
-         - Service name and price
-         - Time required
-         - What's included
-         - Prerequisites (if any)
-         - Then ask if they want to book or see more services
+    BOOKING FLOW:
+    - User wants to book → show services menu (system sends widget)
+    - Service selected → system shows details automatically (don't add extra)
+    - User says they want to book → ask "Kab chahiye?"
+    - Date given → send slot widget
+    - Slot selected → send confirmation
+    - Confirmed → "Booking ho gayi!"
+    - Cancelled → "No problem!"
     
-    SERVICES DISPLAY RULES:
-    - Show prices only when relevant to the conversation or if asked.
-    - If asked to show all/more services → acknowledge ("Sab dikhata hoon!"), system handles the widget.
-    - Never list all services as plain text if you can use the widget.
-    
-    PERSONALITY RULES:
-    - DON'T repeat yourself or the user's message.
-    - NEVER say "I'm an AI" or "I'm a bot" — you are a human from Carmaa Car Care.
-    - If price is asked, give it directly with a brief friendly note.
-    - Use minimal emojis — 1 or 2 at most, only when they add value.
-    - ALWAYS respond in whatever language the user responds, prefer hinglish.
-    - Keep language professional but warm and friendly.
+    IF UNSURE:
+    - Ask simple clarifying question in Hinglish
+    - Don't assume or suggest services user didn't ask about
   `;
 
   // --- AI Client: Ollama (primary, local) → Gemini (fallback, cloud) ---
@@ -1084,19 +1079,20 @@ PROMPT NOTE: Use the [PRIMARY] car/address. If VIP, treat them royally.`;
 
 
       if (text.startsWith('svc_')) {
-        // User picked a service from list — show details first, then ask to book
+        // User picked a service from list — show details, then wait for user response
         const serviceId = text.replace('svc_', '');
         const allServices = userServiceCache.get(cacheKey) || await getServicesForUser(regionId, carType);
         const selectedService = allServices.find((s: any) => s._id === serviceId);
         
         if (selectedService) {
-          // Get full details including prerequisites
+          // Get full details including prerequisites and whatIncludes
           const fullDetails = await getServiceDetails(serviceId, regionId);
           
           if (isWhatsApp && fullDetails) {
             await sendServiceDetailsMessage(userId, phoneId!, fullDetails);
           }
           
+          // Save to draft but don't ask for date yet - let user ask for booking
           draft = {
             ...draft,
             step: 'picking_date',
@@ -1108,14 +1104,12 @@ PROMPT NOTE: Use the [PRIMARY] car/address. If VIP, treat them royally.`;
           };
           bookingDrafts.set(cacheKey, draft);
           
-          // Short ack message, details already shown via widget
-          const ackText = `Badhaiyo! ${selectedService.name} (Rs.${selectedService.price}) lock kar lete hain.\n\nKab chahiye? Today, tomorrow, ya koi specific date?`;
+          // Just save the message, don't send extra text - details already shown
           messages.push({ role: 'user', text, timestamp });
-          messages.push({ role: 'model', text: ackText, timestamp: new Date() });
+          messages.push({ role: 'model', text: 'Service details bheje gaye', timestamp: new Date() });
           contextCache.set(cacheKey, messages.slice(-20));
           persistChat(userId, platform, messages);
-          if (isWhatsApp) await sendWhatsAppText(userId, phoneId!, ackText);
-          return ackText;
+          return ''; // No AI response needed, details already shown
         }
         // Service not found — fall through to AI
         interactiveHandled = true;

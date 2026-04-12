@@ -1,4 +1,4 @@
-const mongoose = require('mongoose');
+import mongoose from 'mongoose';
 const { Schema } = mongoose;
 
 const whatIncludes = new Schema({
@@ -15,6 +15,4 @@ const whatIncludes = new Schema({
     },
 }, { timestamps: true })
 
-
-
-exports.WhatIncludes = mongoose.model("whatIncludes", whatIncludes)
+export const WhatIncludes = mongoose.model("whatIncludes", whatIncludes)
