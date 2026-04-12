@@ -13,6 +13,8 @@ import { Booking } from "./models/Booking.ts";
 import { CarModel } from "./models/CarModel.ts";
 import { AvailableSlots } from "./models/AvailableSlots.ts";
 import { City } from "./models/City.ts";
+import { Service } from "./models/Service.ts";
+import { Prerequisites } from "./models/Prerequisites.ts";
 
 dotenv.config();
 
@@ -360,6 +362,48 @@ async function startServer() {
     }).filter((s: any) => s.price !== null);
   }
 
+  async function getServiceDetails(serviceId: string, regionId: string): Promise<any | null> {
+    try {
+      const service = await Service.findById(serviceId).lean();
+      if (!service) return null;
+
+      const normalizedCarType = 'hatchback';
+      const regionPricing = service.pricing?.find((p: any) => p.region?.toString() === regionId);
+      const fallbackPricing = service.pricing?.[0];
+      const activePricing = regionPricing || fallbackPricing;
+      const priceOption = activePricing?.price_options?.find((o: any) => o.carType === normalizedCarType)
+        || activePricing?.price_options?.[0];
+
+      let prerequisites: string[] = [];
+      if (service.prerequisites && service.prerequisites.length > 0) {
+        const prereqDocs = await Prerequisites.find({ _id: { $in: service.prerequisites } }).lean();
+        prerequisites = prereqDocs.map((p: any) => p.title).filter(Boolean);
+      }
+
+      let whatIncludes: string[] = [];
+      if (service.whatIncludes && service.whatIncludes.length > 0) {
+        const whatIncludesDocs = await Service.find({ _id: { $in: service.whatIncludes } }).lean();
+        whatIncludes = whatIncludesDocs.map((w: any) => w.name).filter(Boolean);
+      }
+
+      return {
+        _id: service._id.toString(),
+        name: service.name,
+        price: priceOption?.price || null,
+        discount: priceOption?.discount || 0,
+        finalPrice: priceOption?.price ? priceOption.price - (priceOption.discount || 0) : null,
+        time: service.time || '2-3 hours',
+        whatIncludes,
+        prerequisites,
+        details: service.details || [],
+        not_included: service.not_included || []
+      };
+    } catch (err) {
+      console.error("Error fetching service details:", err);
+      return null;
+    }
+  }
+
   // Get available slots for a date and region
   // Returns { slots: string[], actualDate: string } — actualDate may differ if nearest future date is used
   async function getAvailableSlots(regionId: string, dateStr: string): Promise<{ slots: string[]; actualDate: string }> {
@@ -626,7 +670,7 @@ PROMPT NOTE: Use the [PRIMARY] car/address. If VIP, treat them royally.`;
     }));
 
     const bodyText = startIndex === 0
-      ? `Yeh raha menu bhai! 🚗✨ (${services.length} services available)`
+      ? `Yeh raha menu! (${services.length} services available)`
       : `Aur bhi hain! Dekho (${startIndex + 1}–${startIndex + chunk.length} of ${services.length}):`;
 
     await axios.post(`https://graph.facebook.com/v17.0/${phoneId}/messages`, {
@@ -635,9 +679,9 @@ PROMPT NOTE: Use the [PRIMARY] car/address. If VIP, treat them royally.`;
       type: "interactive",
       interactive: {
         type: "list",
-        header: { type: "text", text: "🧼 Carmaa Services Menu" },
+        header: { type: "text", text: "Carmaa Services Menu" },
         body: { text: bodyText },
-        footer: { text: hasMore ? `Showing ${startIndex + 1}–${startIndex + chunk.length} of ${services.length}` : "Carmaa — Premium Car Care 🔥" },
+        footer: { text: hasMore ? `Showing ${startIndex + 1}–${startIndex + chunk.length} of ${services.length}` : "Carmaa — Premium Car Care" },
         action: {
           button: "Choose Service",
           sections: [{ title: "Available Services", rows }]
@@ -654,7 +698,7 @@ PROMPT NOTE: Use the [PRIMARY] car/address. If VIP, treat them royally.`;
         type: "interactive",
         interactive: {
           type: "button",
-          body: { text: `Aur bhi ${services.length - startIndex - chunk.length} services hain! 👇` },
+          body: { text: `Aur bhi ${services.length - startIndex - chunk.length} services hain!` },
           action: {
             buttons: [
               { type: "reply", reply: { id: "show_more_services", title: "See More Services" } }
@@ -689,7 +733,7 @@ PROMPT NOTE: Use the [PRIMARY] car/address. If VIP, treat them royally.`;
       description: `Tap to book this slot`
     }));
 
-    const bodyText = `📅 *${dateDisplay}* ke available slots (${displayed.length}${slots.length > 10 ? `/${slots.length}` : ''}):\n\nKaunsa time suit karega? 🕐`;
+    const bodyText = `*${dateDisplay}* ke available slots (${displayed.length}${slots.length > 10 ? `/${slots.length}` : ''}):\n\nKaunsa time suit karega?`;
     const footerText = slots.length > 10 ? `Showing first 10 of ${slots.length} slots` : `${slots.length} slot${slots.length === 1 ? '' : 's'} available`;
 
     try {
@@ -699,7 +743,7 @@ PROMPT NOTE: Use the [PRIMARY] car/address. If VIP, treat them royally.`;
         type: "interactive",
         interactive: {
           type: "list",
-          header: { type: "text", text: "⏰ Choose Your Slot" },
+          header: { type: "text", text: "Choose Your Slot" },
           body: { text: bodyText },
           footer: { text: footerText },
           action: {
@@ -719,7 +763,7 @@ PROMPT NOTE: Use the [PRIMARY] car/address. If VIP, treat them royally.`;
     const carName = user?.suggestedCar?.car_name || "your car";
     const addr = user?.suggestedAddress?.address || "your address";
 
-    const summary = `✅ *Booking Summary*\n\n🚗 *Car:* ${carName}\n🧼 *Service:* ${draft.serviceName}\n💰 *Price:* ₹${draft.price}\n📅 *Date:* ${dateDisplay}\n⏰ *Time:* ${draft.time}\n📍 *Address:* ${addr}\n\n*Confirm karna hai?* 🔥`;
+    const summary = `*Booking Summary*\n\n*Car:* ${carName}\n*Service:* ${draft.serviceName}\n*Price:* Rs.${draft.price}\n*Date:* ${dateDisplay}\n*Time:* ${draft.time}\n*Address:* ${addr}\n\n*Confirm karna hai?*`;
 
     await axios.post(`https://graph.facebook.com/v17.0/${phoneId}/messages`, {
       messaging_product: "whatsapp",
@@ -730,47 +774,91 @@ PROMPT NOTE: Use the [PRIMARY] car/address. If VIP, treat them royally.`;
         body: { text: summary },
         action: {
           buttons: [
-            { type: "reply", reply: { id: "confirm_booking", title: "✅ Confirm" } },
-            { type: "reply", reply: { id: "cancel_booking", title: "❌ Cancel" } }
+            { type: "reply", reply: { id: "confirm_booking", title: "Confirm" } },
+            { type: "reply", reply: { id: "cancel_booking", title: "Cancel" } }
           ]
         }
       }
     }, { headers: { Authorization: `Bearer ${process.env.WHATSAPP_TOKEN}` } });
   }
 
+  async function sendServiceDetailsMessage(to: string, phoneId: string, details: any) {
+    let message = `*${details.name}*\n\n`;
+    message += `💰 *Price:* ₹${details.finalPrice}`;
+    if (details.discount > 0) {
+      message += ` (₹${details.discount} off)`;
+    }
+    message += `\n`;
+    message += `⏱️ *Time:* ${details.time}\n\n`;
+
+    if (details.whatIncludes && details.whatIncludes.length > 0) {
+      message += `*What's Included:*\n`;
+      details.whatIncludes.forEach((item: string) => {
+        message += `  • ${item}\n`;
+      });
+      message += `\n`;
+    }
+
+    if (details.prerequisites && details.prerequisites.length > 0) {
+      message += `*Prerequisites:*\n`;
+      details.prerequisites.forEach((item: string) => {
+        message += `  • ${item}\n`;
+      });
+      message += `\n`;
+    }
+
+    message += `Ready to book? Just say "book" or tell me when you want it!`;
+
+    await sendWhatsAppText(to, phoneId, message);
+  }
+
   const CARMAA_CONTEXT = `
-    You are "Carmaa Bro", the chillest AI Sales Rep for Carmaa (premium door-to-door car service in India).
+    You are a friendly and professional sales representative from Carmaa Car Care (premium door-to-door car service in India).
+    
+    Language:
+    - ALWAYS speak in Hinglish (mix of Hindi and English) - this is mandatory.
+    - Write Hindi words in Roman script (like "namaste", "chahiye", "kitna", "bhai", "gaadi", "chamkani").
+    - Use simple, natural Hinglish that Indian users are comfortable with.
     
     Vibe:
-    - Informal, humorous, slightly "Instagram-y". 
-    - Use Hinglish (mix of Hindi and English) naturally.
-    - Be witty but helpful. No "robotic" corporate speak.
-    - Use emojis like 🚗✨🧼🔥.
-    - Treat the user like a friend — goal is BOOKING.
-    - Keep it SHORT. WhatsApp users don't read essays.
+    - Speak like a real person from Carmaa - not an AI bot.
+    - Be helpful, warm and professional.
+    - Use 1-2 emojis maximum per message only when appropriate.
+    - Treat the user like a valued customer — goal is BOOKING.
+    - Keep it SHORT. WhatsApp users don't read long messages.
+    - NEVER say you are an AI or bot. You are a human representative from Carmaa.
     
     BOOKING FLOW RULES (follow strictly):
     1. When user wants to book → say you'll show them the services menu (the system will send a widget automatically).
-    2. After service selected → ask WHEN they want it. Keep it casual: "Kab chahiye bro?"
+    2. After service selected → ask WHEN they want it. Say "Kab chahiye?"
     3. After date given → confirm the date back to user ("Okay, [date] ke liye slot dhundta hoon!") — system handles slot widget.
     4. After slot selected → system will show confirmation — just stay ready.
-    5. After confirmed → celebrate! "Booking ho gayi bhai! 🎉"
+    5. After confirmed → say "Booking ho gayi! Our team will reach you on time."
     6. After cancelled → "No problem! Jab bhi ready ho, batao." and reset.
+    
+    SERVICE DETAILS FLOW:
+    - When user asks for service details ("kya details hain", "show details", "service details", "kitne options hain"):
+      1. Acknowledge: "Dekho sab services!"
+      2. System will show service list widget automatically
+      3. After user picks a service, show full details in text including:
+         - Service name and price
+         - Time required
+         - What's included
+         - Prerequisites (if any)
+         - Then ask if they want to book or see more services
     
     SERVICES DISPLAY RULES:
     - Show prices only when relevant to the conversation or if asked.
-    - If asked to show all/more services → acknowledge ("Haan bhai, sab dikhata hoon!"), system handles the widget.
+    - If asked to show all/more services → acknowledge ("Sab dikhata hoon!"), system handles the widget.
     - Never list all services as plain text if you can use the widget.
     
     PERSONALITY RULES:
-    - Don't repeat yourself or the user's message.
-    - Never say "I'm an AI" — you're Carmaa Bro, a human-feeling rep.
-    - If price is asked, give it with a joke or fun comment.
-    - If they hesitate, say "Gaadi gandi acchi nahi lagti bro!"
-    
-    Offers:
-    - First booking? CARMAA20 for 20% off. "Pehli baar, toh discount banta hai!"
-    - Refer a friend? ₹200 off. "Dost ka bhala, aapka bhi bhala."
+    - DON'T repeat yourself or the user's message.
+    - NEVER say "I'm an AI" or "I'm a bot" — you are a human from Carmaa Car Care.
+    - If price is asked, give it directly with a brief friendly note.
+    - Use minimal emojis — 1 or 2 at most, only when they add value.
+    - ALWAYS respond in whatever language the user responds, prefer hinglish.
+    - Keep language professional but warm and friendly.
   `;
 
   // --- AI Client: Ollama (primary, local) → Gemini (fallback, cloud) ---
@@ -984,10 +1072,10 @@ PROMPT NOTE: Use the [PRIMARY] car/address. If VIP, treat them royally.`;
           draft = { ...draft, step: 'picking_service', serviceOffset: currentOffset };
           bookingDrafts.set(cacheKey, draft);
         } else if (isWhatsApp) {
-          await sendWhatsAppText(userId, phoneId!, 'Bhai yeh sab services hain humari! Ab choose karo 😄');
+          await sendWhatsAppText(userId, phoneId!, 'Yeh sab services hain. Ab choose karo');
         }
         messages.push({ role: 'user', text, timestamp });
-        const ackText = `Showing services ${currentOffset + 1}–${Math.min(currentOffset + 10, allServices.length)} of ${allServices.length}`;
+        const ackText = `Services dikhaya ${currentOffset + 1}–${Math.min(currentOffset + 10, allServices.length)} of ${allServices.length}`;
         messages.push({ role: 'model', text: ackText, timestamp: new Date() });
         contextCache.set(cacheKey, messages.slice(-20));
         persistChat(userId, platform, messages);
@@ -996,11 +1084,19 @@ PROMPT NOTE: Use the [PRIMARY] car/address. If VIP, treat them royally.`;
 
 
       if (text.startsWith('svc_')) {
-        // User picked a service from list — return early, no AI needed
+        // User picked a service from list — show details first, then ask to book
         const serviceId = text.replace('svc_', '');
         const allServices = userServiceCache.get(cacheKey) || await getServicesForUser(regionId, carType);
         const selectedService = allServices.find((s: any) => s._id === serviceId);
+        
         if (selectedService) {
+          // Get full details including prerequisites
+          const fullDetails = await getServiceDetails(serviceId, regionId);
+          
+          if (isWhatsApp && fullDetails) {
+            await sendServiceDetailsMessage(userId, phoneId!, fullDetails);
+          }
+          
           draft = {
             ...draft,
             step: 'picking_date',
@@ -1011,13 +1107,15 @@ PROMPT NOTE: Use the [PRIMARY] car/address. If VIP, treat them royally.`;
             serviceOffset: 0
           };
           bookingDrafts.set(cacheKey, draft);
-          const reply = `Perfect choice bhai! 🔥 *${selectedService.name}* (₹${selectedService.price}) lock kar lete hain.\n\nKab chahiye? Today, tomorrow, ya koi specific date batao? 📅`;
+          
+          // Short ack message, details already shown via widget
+          const ackText = `Badhaiyo! ${selectedService.name} (Rs.${selectedService.price}) lock kar lete hain.\n\nKab chahiye? Today, tomorrow, ya koi specific date?`;
           messages.push({ role: 'user', text, timestamp });
-          messages.push({ role: 'model', text: reply, timestamp: new Date() });
+          messages.push({ role: 'model', text: ackText, timestamp: new Date() });
           contextCache.set(cacheKey, messages.slice(-20));
           persistChat(userId, platform, messages);
-          if (isWhatsApp) await sendWhatsAppText(userId, phoneId!, reply);
-          return reply;
+          if (isWhatsApp) await sendWhatsAppText(userId, phoneId!, ackText);
+          return ackText;
         }
         // Service not found — fall through to AI
         interactiveHandled = true;
@@ -1030,7 +1128,7 @@ PROMPT NOTE: Use the [PRIMARY] car/address. If VIP, treat them royally.`;
 
         if (isWhatsApp && resolved) {
           await sendWhatsAppConfirmation(userId, phoneId!, draft, resolved);
-          const confirmMsg = `System sent confirmation widget for: ${draft.serviceName} on ${formatDateDisplay(draft.date)} at ${time}.`;
+          const confirmMsg = `Booking confirm karne ke liye niche button dabayein: ${draft.serviceName} on ${formatDateDisplay(draft.date)} at ${time}.`;
           messages.push({ role: 'user', text, timestamp });
           messages.push({ role: 'model', text: confirmMsg, timestamp: new Date() });
           contextCache.set(cacheKey, messages.slice(-20));
@@ -1046,7 +1144,7 @@ PROMPT NOTE: Use the [PRIMARY] car/address. If VIP, treat them royally.`;
         if (draft.step === 'confirming' && draft.serviceId && draft.date && draft.time && resolved) {
           const result = await createBookingViaAPI(draft, resolved);
           if (result.success) {
-            const successText = `🎉 Ho gayi booking bhai!\n\n✅ *${draft.serviceName}*\n📅 ${formatDateDisplay(draft.date)}\n⏰ ${draft.time}\n\nOur team will reach you on time. Gaadi chamakne wali hai! 🚗✨`;
+            const successText = `Booking ho gayi!\n\nService: ${draft.serviceName}\nDate: ${formatDateDisplay(draft.date)}\nTime: ${draft.time}\n\nOur team will reach you on time.`;
             if (isWhatsApp) await sendWhatsAppText(userId, phoneId!, successText);
             bookingDrafts.delete(cacheKey);
             messages.push({ role: 'user', text: 'confirm_booking', timestamp });
@@ -1056,7 +1154,7 @@ PROMPT NOTE: Use the [PRIMARY] car/address. If VIP, treat them royally.`;
             console.log(`[${new Date().toLocaleTimeString()}] ✅ BOOKING CONFIRMED for ${userId}`);
             return successText;
           } else {
-            const errText = `Bhai, kuch technical issue hua! 😅 Please call us directly or try again in a bit. Error: ${result.error}`;
+            const errText = `Bhai, kuch technical issue hua! Please call us directly or try again in a bit. Error: ${result.error}`;
             if (isWhatsApp) await sendWhatsAppText(userId, phoneId!, errText);
             return errText;
           }
@@ -1066,7 +1164,7 @@ PROMPT NOTE: Use the [PRIMARY] car/address. If VIP, treat them royally.`;
 
       } else if (text === 'cancel_booking') {
         bookingDrafts.delete(cacheKey);
-        const cancelText = "No problem bhai! Jab bhi gaadi chamkani ho, batao. Main hoon! 🚗";
+        const cancelText = "No problem bhai! Jab bhi gaadi chamkani ho, batao.";
         if (isWhatsApp) await sendWhatsAppText(userId, phoneId!, cancelText);
         messages.push({ role: 'user', text: 'cancel_booking', timestamp });
         messages.push({ role: 'model', text: cancelText, timestamp: new Date() });
@@ -1111,7 +1209,7 @@ PROMPT NOTE: Use the [PRIMARY] car/address. If VIP, treat them royally.`;
                 // Offer nearest with confirmation
                 const offerMsg = `Bhai, *${formatDateDisplay(parsedDate)}* ke liye koi slot nahi hai (holiday ya off day). ` +
                   `Nearest available date hai *${formatDateDisplay(nearestDoc.date)}*. ` +
-                  `Kya us din book karein? 📅`;
+                  `Kya us din book karein?`;
                 if (isWhatsApp) await sendWhatsAppText(userId, phoneId!, offerMsg);
                 // Prime the draft with the nearest date so if they confirm with any positive, use it
                 draft = { ...draft, step: 'picking_date', _suggestedDate: nearestDoc.date };
@@ -1164,11 +1262,11 @@ PROMPT NOTE: Use the [PRIMARY] car/address. If VIP, treat them royally.`;
             bookingDrafts.set(cacheKey, draft);
 
             if (isWhatsApp) {
-              await sendWhatsAppText(userId, phoneId!, `Okay! ${formatDateDisplay(parsedDate)} ke liye slot dhundta hoon... 🔍`);
+              await sendWhatsAppText(userId, phoneId!, `Okay! ${formatDateDisplay(parsedDate)} ke liye slot dhundta hoon...`);
               await sendWhatsAppSlotButtons(userId, phoneId!, slots, parsedDate);
             }
 
-            const slotMsg = `Available slots for ${parsedDate}: ${slots.join(', ')}`;
+            const slotMsg = `${parsedDate} ke liye available slots: ${slots.join(', ')}`;
             messages.push({ role: 'user', text, timestamp });
             messages.push({ role: 'model', text: slotMsg, timestamp: new Date() });
             contextCache.set(cacheKey, messages.slice(-20));
@@ -1178,7 +1276,7 @@ PROMPT NOTE: Use the [PRIMARY] car/address. If VIP, treat them royally.`;
 
         } else if (inDateSelection && !parsedDate) {
           // Couldn't parse — ask again, DO NOT call Ollama
-          const nudge = `Bhai, date samajh nahi aaya! 😅 Yeh try karo:\n- "kal" (tomorrow)\n- "29 April"\n- "2026-04-29"\nKab chahiye service?`;
+          const nudge = `Bhai, date samajh nahi aaya! Yeh try karo:\n- "kal" (tomorrow)\n- "29 April"\n- "2026-04-29"\nKab chahiye service?`;
           if (isWhatsApp) await sendWhatsAppText(userId, phoneId!, nudge);
           messages.push({ role: 'user', text, timestamp });
           messages.push({ role: 'model', text: nudge, timestamp: new Date() });
@@ -1193,10 +1291,10 @@ PROMPT NOTE: Use the [PRIMARY] car/address. If VIP, treat them royally.`;
         // User is supposed to tap a slot, not type text — re-send the slot widget
         const { slots } = await getAvailableSlots(regionId, draft.date);
         if (isWhatsApp && slots.length > 0) {
-          await sendWhatsAppText(userId, phoneId!, `Bhai, slot select karo na! 😄 Yeh dekho:`);
+          await sendWhatsAppText(userId, phoneId!, `Bhai, slot select karo na! Yeh dekho:`);
           await sendWhatsAppSlotButtons(userId, phoneId!, slots, draft.date);
           messages.push({ role: 'user', text, timestamp });
-          const msg2 = `Re-sent slot widget for ${draft.date}`;
+          const msg2 = `Slot fir se bheja ${draft.date} ke liye`;
           messages.push({ role: 'model', text: msg2, timestamp: new Date() });
           contextCache.set(cacheKey, messages.slice(-20));
           persistChat(userId, platform, messages);
@@ -1205,8 +1303,9 @@ PROMPT NOTE: Use the [PRIMARY] car/address. If VIP, treat them royally.`;
       }
 
       // ── Fetch Services & Send Widget ───────────────────────────────────────
-      const wantsServices = /service|book|wash|clean|detail|menu|what.*offer|kya.*milega|packages?|show more|aur.*dikhao|more service/i.test(text);
+      const wantsServices = /service|book|wash|clean|detail|menu|what.*offer|kya.*milega|packages?|show more|aur.*dikhao|more service|kya.*details|kitne.*options/i.test(text);
       const wantsMoreServices = /^(more|aur dikhao|aur batao|baaki|remaining|show more|next)$/i.test(text.trim());
+      const wantsServiceDetails = /kya.*details|show.*detail|service.*detail|kitna.*time|kitne.*dollar|full.*detail/i.test(text);
 
       if (wantsServices || wantsMoreServices) {
         const allServices = await getServicesForUser(regionId, carType);
@@ -1221,7 +1320,7 @@ PROMPT NOTE: Use the [PRIMARY] car/address. If VIP, treat them royally.`;
 
           // If 'more' was the only trigger, send a text ack and return — no AI text needed
           if (wantsMoreServices && !wantsServices) {
-            const ackText = `Yeh lo aur bhi options! 👇 (${currentOffset + 1}–${Math.min(currentOffset + 10, allServices.length)} of ${allServices.length})`;
+            const ackText = `Aur options bhi hain (${currentOffset + 1}–${Math.min(currentOffset + 10, allServices.length)} of ${allServices.length}):`;
             messages.push({ role: 'user', text, timestamp });
             messages.push({ role: 'model', text: ackText, timestamp: new Date() });
             contextCache.set(cacheKey, messages.slice(-20));
@@ -1283,7 +1382,7 @@ CURRENT BOOKING DRAFT:
       } else {
         console.error("Error in handleMessage:", error.message || error);
       }
-      return "Sorry bro, kuch toh gadbad hai! Thoda wait karo. 🙏";
+      return "Sorry bhai, kuch gadbad hai! Thoda wait karo.";
     }
   }
 
@@ -1304,18 +1403,18 @@ CURRENT BOOKING DRAFT:
   app.get("/widget.js", (req, res) => {
     res.setHeader("Content-Type", "application/javascript");
     res.setHeader("Access-Control-Allow-Origin", "*");
-    res.send(`
+    const widgetScript = `
       (function() {
         const API_BASE = window.location.origin;
         const initWidget = () => {
           if (document.getElementById('carmaa-chat-widget')) return;
-          const config = window.CarmaaAIConfig || { themeColor: '#ea580c', title: 'Carmaa Bro 🚗' };
+          const config = window.CarmaaAIConfig || { themeColor: '#ea580c', title: 'Carmaa Car Care' };
           const div = document.createElement('div');
           div.id = 'carmaa-chat-widget';
           div.style.cssText = 'position:fixed;bottom:20px;right:20px;z-index:999999;font-family:sans-serif;';
           div.innerHTML = \`
             <button id="carmaa-toggle" style="background:\${config.themeColor};color:#fff;border:none;padding:15px 25px;border-radius:50px;cursor:pointer;box-shadow:0 4px 12px rgba(0,0,0,0.2);font-weight:bold;display:flex;align-items:center;gap:10px;">
-              <span>Chat with Carmaa Bro</span> 🚗
+              <span>Chat with Carmaa Car Care</span>
             </button>
             <div id="carmaa-box" style="display:none;width:350px;height:500px;background:#fff;border:1px solid #eee;border-radius:20px;margin-bottom:15px;flex-direction:column;box-shadow:0 10px 40px rgba(0,0,0,0.15);overflow:hidden;">
               <div style="padding:20px;background:\${config.themeColor};color:#fff;font-weight:bold;display:flex;justify-content:space-between;align-items:center;">
@@ -1323,9 +1422,9 @@ CURRENT BOOKING DRAFT:
                 <button id="carmaa-close" style="background:none;border:none;color:#fff;cursor:pointer;font-size:20px;">&times;</button>
               </div>
               <div id="carmaa-msgs" style="flex:1;overflow-y:auto;padding:20px;background:#f9f9f9;display:flex;flex-direction:column;gap:10px;">
-                <div style="text-align:left;"><span style="background:#fff;border:1px solid #eee;padding:10px 14px;border-radius:18px;border-bottom-left-radius:4px;display:inline-block;max-width:85%;font-size:14px;line-height:1.4;">Namaste! Carmaa Bro here. Gaadi chamkani hai? 🔥</span></div>
+                <div style="text-align:left;"><span style="background:#fff;border:1px solid #eee;padding:10px 14px;border-radius:18px;border-bottom-left-radius:4px;display:inline-block;max-width:85%;font-size:14px;line-height:1.4;">Namaste! Main Carmaa se bol raha hoon. Gaadi chamkani hai kya?</span></div>
               </div>
-              <div id="carmaa-typing" style="display:none;padding:5px 20px;font-size:12px;color:#999;">Bro is typing...</div>
+              <div id="carmaa-typing" style="display:none;padding:5px 20px;font-size:12px;color:#999;">Typing...</div>
               <div style="padding:15px;border-top:1px solid #eee;display:flex;gap:8px;background:#fff;">
                 <input id="carmaa-input" type="text" placeholder="Type a message..." style="flex:1;border:1px solid #ddd;padding:10px 15px;border-radius:25px;outline:none;font-size:14px;">
                 <button id="carmaa-send" style="background:\${config.themeColor};color:#fff;border:none;width:40px;height:40px;border-radius:50%;cursor:pointer;display:flex;align-items:center;justify-content:center;font-weight:bold;">&rarr;</button>
@@ -1372,7 +1471,7 @@ CURRENT BOOKING DRAFT:
               const data = await res.json();
               appendMsg(data.text, false);
             } catch (e) {
-              appendMsg("Sorry bro, connection issue. Try again!", false);
+              appendMsg("Connection issue. Try again!", false);
             } finally {
               typing.style.display = 'none';
             }
@@ -1383,7 +1482,8 @@ CURRENT BOOKING DRAFT:
         if (document.readyState === 'complete') initWidget();
         else window.addEventListener('load', initWidget);
       })();
-    `);
+    `;
+    res.send(widgetScript);
   });
 
   // --- Vite Middleware (local dev only) ---

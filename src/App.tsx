@@ -35,7 +35,7 @@ export default function App() {
   const [searchQuery, setSearchQuery] = useState("");
   const [pagination, setPagination] = useState({ page: 1, totalPages: 1, total: 0 });
   const [messages, setMessages] = useState<Message[]>([
-    { id: "1", role: "bot", text: "Namaste! I am Carmaa Bro. Gaadi chamkani hai kya? 🔥", timestamp: new Date() }
+    { id: "1", role: "bot", text: "Namaste! Main Carmaa se bol raha hoon. Gaadi chamkani hai kya?", timestamp: new Date() }
   ]);
   const [inputText, setInputText] = useState("");
   const [isTyping, setIsTyping] = useState(false);
