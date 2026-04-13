@@ -540,7 +540,10 @@ async function startServer() {
   }
 
   async function sendWhatsAppConfirmation(to: string, phoneId: string, draft: any, user: any) {
-    const summary = `*Summary*\n\n*Service:* ${draft.serviceName}\n*Date:* ${formatDateDisplay(draft.date)}\n*Time:* ${draft.time}\n\nConfirm?`;
+    const carName = user?.suggestedCar?.car_name || 'N/A';
+    const address = user?.suggestedAddress?.address || 'N/A';
+    const finalPrice = draft.price ? `₹${draft.price}` : 'N/A';
+    const summary = `*Booking Summary*\n\n*Car:* ${carName}\n*Service:* ${draft.serviceName}\n*Price:* ${finalPrice}\n*Date:* ${formatDateDisplay(draft.date)}\n*Time:* ${draft.time}\n*Address:* ${address}\n\nConfirm?`;
     await axios.post(`https://graph.facebook.com/v17.0/${phoneId}/messages`, {
       messaging_product: "whatsapp", to, type: "interactive",
       interactive: { type: "button", body: { text: summary }, action: { buttons: [{ type: "reply", reply: { id: "confirm_booking", title: "Confirm" } }, { type: "reply", reply: { id: "cancel_booking", title: "Cancel" } }] } }
@@ -549,7 +552,8 @@ async function startServer() {
 
   function formatServiceDetails(service: any): string {
     const lines = [`🧽 *${service.name}*`, `─────────────────────────`, `💰 *Price:* ₹${service.price}`, `⏱️ *Duration:* ${service.time}`];
-    if (service.whatIncludes?.length) { lines.push(``, `✅ *Included:*`); service.whatIncludes.forEach((d: string) => lines.push(` › ${d}`)); }
+    if (service.whatIncludes?.length) { lines.push(``, `✅ *What's Included:*`); service.whatIncludes.forEach((d: string) => lines.push(` › ${d}`)); }
+    if (service.prerequisites?.length) { lines.push(``, `⚠️ *Prerequisites:*`); service.prerequisites.forEach((d: string) => lines.push(` › ${d}`)); }
     return lines.join('\n');
   }
 
@@ -746,7 +750,9 @@ async function startServer() {
         if (draft.step === 'confirming' && draft.serviceId && draft.date && draft.time && resolved) {
           const result = await createBookingViaAPI(draft, resolved);
           if (result.success) {
-            const successText = `Booking ho gayi!\n\nService: ${draft.serviceName}\nDate: ${formatDateDisplay(draft.date)}\nTime: ${draft.time}\n\nOur team will reach you on time.`;
+            const carName = resolved?.suggestedCar?.car_name || 'N/A';
+            const address = resolved?.suggestedAddress?.address || 'N/A';
+            const successText = `✅ *Booking Confirmed!*\n\n*Car:* ${carName}\n*Service:* ${draft.serviceName}\n*Price:* ₹${draft.price}\n*Date:* ${formatDateDisplay(draft.date)}\n*Time:* ${draft.time}\n*Address:* ${address}\n\nOur team will reach you on time. 🙌`;
             if (isWhatsApp) await sendWhatsAppText(userId, phoneId!, successText);
             bookingDrafts.delete(cacheKey);
             messages.push({ role: 'user', text: 'confirm_booking', timestamp });
