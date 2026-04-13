@@ -28,6 +28,9 @@
     "react-dom": "^19.0.0",
     "vite": "^6.2.0"
   },
+  "optionalDependencies": {
+    "@rollup/rollup-linux-x64-gnu": "*"
+  },
   "devDependencies": {
     "@types/express": "^4.17.21",
     "@types/node": "^22.14.0",
