@@ -7,15 +7,15 @@ import axios from "axios";
 import dotenv from "dotenv";
 import mongoose from "mongoose";
 import cors from "cors";
-import { Chat } from "./models/Chat";
-import { User } from "./models/User";
-import { Service } from "./models/Service";
-import { Booking } from "./models/Booking";
-import { CarModel } from "./models/CarModel";
-import { AvailableSlots } from "./models/AvailableSlots";
-import { City } from "./models/City";
-import { Prerequisites } from "./models/Prerequisites";
-import { WhatIncludes } from "./models/WhatIncludes";
+import { Chat } from "./models/Chat.js";
+import { User } from "./models/User.js";
+import { Service } from "./models/Service.js";
+import { Booking } from "./models/Booking.js";
+import { CarModel } from "./models/CarModel.js";
+import { AvailableSlots } from "./models/AvailableSlots.js";
+import { City } from "./models/City.js";
+import { Prerequisites } from "./models/Prerequisites.js";
+import { WhatIncludes } from "./models/WhatIncludes.js";
 
 dotenv.config();
 
