@@ -709,6 +709,55 @@ PROMPT NOTE: Use the [PRIMARY] car/address. If VIP, treat them royally.`;
     }
   }
 
+  async function sendWhatsAppServiceInfoList(to: string, phoneId: string, services: any[], startIndex = 0) {
+    const chunk = services.slice(startIndex, startIndex + 10);
+    const hasMore = services.length > startIndex + 10;
+
+    const rows = chunk.map(s => ({
+      id: `svc_info_${s._id}`,
+      title: abbreviateServiceName(s.name),
+      description: `₹${s.price}${s.discount > 0 ? ` (₹${s.discount} off!)` : ''} — Tap for details`
+    }));
+
+    const bodyText = startIndex === 0
+      ? `Dekho yeh available services hain details ke liye:`
+      : `Aur bhi hain! Dekho (${startIndex + 1}–${startIndex + chunk.length} of ${services.length}):`;
+
+    await axios.post(`https://graph.facebook.com/v17.0/${phoneId}/messages`, {
+      messaging_product: "whatsapp",
+      to,
+      type: "interactive",
+      interactive: {
+        type: "list",
+        header: { type: "text", text: "Service Details Menu" },
+        body: { text: bodyText },
+        footer: { text: hasMore ? `Showing ${startIndex + 1}–${startIndex + chunk.length} of ${services.length}` : "Carmaa — Premium Car Care" },
+        action: {
+          button: "View Details",
+          sections: [{ title: "Available Services", rows }]
+        }
+      }
+    }, { headers: { Authorization: `Bearer ${process.env.WHATSAPP_TOKEN}` } });
+
+    if (hasMore) {
+      await new Promise(r => setTimeout(r, 800));
+      await axios.post(`https://graph.facebook.com/v17.0/${phoneId}/messages`, {
+        messaging_product: "whatsapp",
+        to,
+        type: "interactive",
+        interactive: {
+          type: "button",
+          body: { text: `Aur bhi ${services.length - startIndex - chunk.length} services hain details ke liye!` },
+          action: {
+            buttons: [
+              { type: "reply", reply: { id: "show_more_info_services", title: "See More Details" } }
+            ]
+          }
+        }
+      }, { headers: { Authorization: `Bearer ${process.env.WHATSAPP_TOKEN}` } });
+    }
+  }
+
   async function sendWhatsAppSlotButtons(to: string, phoneId: string, slots: string[], dateStr: string) {
     const dateDisplay = formatDateDisplay(dateStr);
 
@@ -780,6 +829,38 @@ PROMPT NOTE: Use the [PRIMARY] car/address. If VIP, treat them royally.`;
         }
       }
     }, { headers: { Authorization: `Bearer ${process.env.WHATSAPP_TOKEN}` } });
+  }
+
+  function formatServiceDetails(service: any): string {
+    const lines: string[] = [];
+
+    lines.push(`🧽 *${service.name}*`);
+    lines.push(`─────────────────────────`);
+
+    if (service.price)      lines.push(`💰 *Price:*    ₹${service.price}${service.discount > 0 ? ` _(save ₹${service.discount}!)_` : ''}`);
+    if (service.time)       lines.push(`⏱️ *Duration:* ${service.time}`);
+    if (service.quick_wash) lines.push(`⚡ *Type:*     Quick Wash — fast & efficient`);
+    if (service.warranty)   lines.push(`🛡️ *Warranty:* ${service.warrantyDuration || 'Yes'}`);
+
+    if (service.whatIncludes && service.whatIncludes.length > 0) {
+      lines.push(``);
+      lines.push(`✅ *What's Included:*`);
+      service.whatIncludes.forEach((d: string) => lines.push(`  › ${d}`));
+    }
+
+    if (service.prerequisites && service.prerequisites.length > 0) {
+      lines.push(``);
+      lines.push(`⚠️ *Before We Arrive:*`);
+      service.prerequisites.forEach((p: string) => lines.push(`  › ${p}`));
+    }
+
+    if (service.exclusions && service.exclusions.length > 0) {
+      lines.push(``);
+      lines.push(`❌ *Not Included:*`);
+      service.exclusions.forEach((e: string) => lines.push(`  › ${e}`));
+    }
+
+    return lines.join('\n');
   }
 
   async function sendServiceDetailsMessage(to: string, phoneId: string, details: any) {
@@ -1054,6 +1135,22 @@ PROMPT NOTE: Use the [PRIMARY] car/address. If VIP, treat them royally.`;
         return ''; // No AI response - just the widget
       }
 
+      if (!interactiveHandled && text === 'show_more_info_services') {
+        // User tapped the "See More Details" button
+        const allServices = userServiceCache.get(cacheKey) || await getServicesForUser(regionId, carType);
+        userServiceCache.set(cacheKey, allServices);
+        const currentOffset = (draft.serviceOffset || 0) + 10;
+        if (isWhatsApp && allServices.length > currentOffset) {
+          await sendWhatsAppServiceInfoList(userId, phoneId!, allServices, currentOffset);
+          draft = { ...draft, step: 'picking_service', serviceOffset: currentOffset };
+          bookingDrafts.set(cacheKey, draft);
+        }
+        messages.push({ role: 'user', text, timestamp });
+        messages.push({ role: 'model', text: 'Services info widget sent', timestamp: new Date() });
+        contextCache.set(cacheKey, messages.slice(-20));
+        persistChat(userId, platform, messages);
+        return '';
+      }
 
       if (text.startsWith('svc_info_')) {
         // User picked a service from the INFO list — show details
@@ -1103,8 +1200,17 @@ PROMPT NOTE: Use the [PRIMARY] car/address. If VIP, treat them royally.`;
           };
           bookingDrafts.set(cacheKey, draft);
           
-          systemMessage = `User picked service: ${selectedService.name}. Enthusiastically confirm their choice and ask them politely what date they would like the service.`;
-          interactiveHandled = true;
+          const bookingPrompt = `Awesome choice! Aapne *${selectedService.name}* select kiya hai. ✨\n\nAapko yeh service kis date ko chahiye? (e.g., Today, Tomorrow, ya koi specific date bataiye)`;
+          
+          if (isWhatsApp) {
+            await sendWhatsAppText(userId, phoneId!, bookingPrompt);
+          }
+          
+          messages.push({ role: 'user', text, timestamp });
+          messages.push({ role: 'model', text: bookingPrompt, timestamp: new Date() });
+          contextCache.set(cacheKey, messages.slice(-20));
+          persistChat(userId, platform, messages);
+          return bookingPrompt; // No AI response needed
         } else {
           interactiveHandled = true;
         }
@@ -1292,11 +1398,26 @@ PROMPT NOTE: Use the [PRIMARY] car/address. If VIP, treat them royally.`;
       }
 
       // ── Fetch Services & Send Widget ───────────────────────────────────────
-      const wantsServices = /service|book|wash|clean|detail|menu|what.*offer|kya.*milega|packages?|show more|aur.*dikhao|more service|kya.*details|kitne.*options/i.test(text);
+      const wantsServiceDetails = /details?|info|kya.*details|show.*detail|service.*detail|kitna.*time|full.*detail|thoda.*details|details?.*chahiye/i.test(text);
+      const wantsServices = /service|book|wash|clean|menu|what.*offer|kya.*milega|packages?|show more|aur.*dikhao|more service|kitne.*options/i.test(text);
       const wantsMoreServices = /^(more|aur dikhao|aur batao|baaki|remaining|show more|next)$/i.test(text.trim());
-      const wantsServiceDetails = /kya.*details|show.*detail|service.*detail|kitna.*time|kitne.*dollar|full.*detail/i.test(text);
 
-      if (wantsServices || wantsMoreServices) {
+      if (wantsServiceDetails) {
+        const allServices = await getServicesForUser(regionId, carType);
+        userServiceCache.set(cacheKey, allServices);
+
+        if (isWhatsApp && allServices.length > 0) {
+          await sendWhatsAppServiceInfoList(userId, phoneId!, allServices, 0);
+          draft = { ...draft, step: 'picking_service', serviceOffset: 0 };
+          bookingDrafts.set(cacheKey, draft);
+
+          messages.push({ role: 'user', text, timestamp });
+          messages.push({ role: 'model', text: 'Service details widget sent', timestamp: new Date() });
+          contextCache.set(cacheKey, messages.slice(-20));
+          persistChat(userId, platform, messages);
+          return '';
+        }
+      } else if (wantsServices || wantsMoreServices) {
         const allServices = await getServicesForUser(regionId, carType);
         userServiceCache.set(cacheKey, allServices);
 
