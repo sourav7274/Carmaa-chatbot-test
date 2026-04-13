@@ -562,24 +562,27 @@ async function startServer() {
   async function callAI(messages: any[], systemInstruction: string): Promise<string> {
     try {
       const gemmaKey = process.env.GEMMA_API_KEY; const gemmaModel = process.env.GEMMA_MODEL;
+      console.log(`[AI] Trying Gemma model: ${gemmaModel}, key exists: ${!!gemmaKey}`);
       if (gemmaKey?.length > 10) {
         const { GoogleGenAI } = await import('@google/genai');
         const genAI = new GoogleGenAI({ apiKey: gemmaKey });
         const history = messages.slice(-10).map(m => ({ role: m.role === 'user' ? 'user' : 'model', parts: [{ text: m.text }] }));
         const response = await genAI.models.generateContent({ model: gemmaModel, contents: history, config: { systemInstruction } });
-        if (response.text) return response.text;
+        if (response.text) { console.log(`[AI] Gemma responded OK`); return response.text; }
       }
-    } catch (err) {}
+    } catch (err: any) { console.error(`[AI] Gemma failed:`, err.message); }
     try {
       const geminiKey = process.env.GEMINI_API_KEY; const geminiModel = process.env.GEMINI_MODEL;
+      console.log(`[AI] Trying Gemini model: ${geminiModel}, key exists: ${!!geminiKey}`);
       if (geminiKey?.length > 10) {
         const { GoogleGenAI } = await import('@google/genai');
         const genAI = new GoogleGenAI({ apiKey: geminiKey });
         const history = messages.slice(-10).map(m => ({ role: m.role === 'user' ? 'user' : 'model', parts: [{ text: m.text }] }));
         const response = await genAI.models.generateContent({ model: geminiModel, contents: history, config: { systemInstruction } });
-        if (response.text) return response.text;
+        if (response.text) { console.log(`[AI] Gemini responded OK`); return response.text; }
       }
-    } catch (err) {}
+    } catch (err: any) { console.error(`[AI] Gemini failed:`, err.message); }
+    console.error(`[AI] Both models failed, returning fallback`);
     return "Bro, AI thoda busy hai abhi! Ek min mein dobara try karo.";
   }
 
@@ -592,13 +595,16 @@ async function startServer() {
 
   app.post("/webhook", async (req, res) => {
     const body = req.body;
+    console.log(`[Webhook] Received: ${JSON.stringify(body).slice(0, 200)}`);
     if (body.object === "whatsapp_business_account") {
       const entry = body.entry?.[0]?.changes?.[0]?.value;
       if (entry?.messages?.[0]) {
         const mid = entry.messages[0].id;
+        console.log(`[Webhook] Message ID: ${mid}, already processed: ${processedMids.has(mid)}`);
         if (processedMids.has(mid)) return res.sendStatus(200);
         processedMids.set(mid, Date.now()); res.sendStatus(200);
         let msg_text = entry.messages[0].type === 'text' ? entry.messages[0].text?.body : (entry.messages[0].interactive?.button_reply?.id || entry.messages[0].interactive?.list_reply?.id || "");
+        console.log(`[Webhook] Processing message from ${entry.messages[0].from}: "${msg_text}"`);
         (async () => { await handleMessage(entry.messages[0].from, msg_text, 'whatsapp', entry.metadata.phone_number_id); })();
         return;
       }
@@ -619,24 +625,333 @@ async function startServer() {
 
   async function handleMessage(userId: string, text: string, platform: string, phoneId?: string): Promise<string> {
     const cacheKey = `${platform}:${userId}`;
-    const cleanId = userId.toString().replace(/\s+/g, '').replace('+', '');
-    const userQuery = { $or: [{ user_id: cleanId }, { mobile_number: Number(cleanId.replace(/^91/, '')) }] };
-    const dbUser = await User.findOne(userQuery);
-    const resolved = await resolveUserData(dbUser);
-    const regionId = resolveRegionId(resolved);
-    const carType = resolved?.suggestedCar?.car_type || 'hatchback';
-    let messages = contextCache.get(cacheKey) || [];
-    if (!messages.length) { const chat = await Chat.findOne({ userId, platform }); if (chat) messages = chat.messages; }
-    let draft = bookingDrafts.get(cacheKey) || { step: 'idle' };
-    
-    // Logic for cancelling, picking services, slots, etc. follows same pattern...
-    // Redacted for brevity as this is a move, but preserving core flow...
-    
-    const aiResponse = await callAI(messages.slice(-10), CARMAA_CONTEXT + draft.step);
-    messages.push({ role: 'user', text, timestamp: new Date() }, { role: 'model', text: aiResponse, timestamp: new Date() });
-    contextCache.set(cacheKey, messages);
-    if (phoneId) await sendWhatsAppText(userId, phoneId, aiResponse);
-    return aiResponse;
+    const isWhatsApp = platform === 'whatsapp' && !!phoneId;
+
+    try {
+      const cleanId = userId.toString().replace(/\s+/g, '').replace('+', '');
+      const isNumeric = /^\d+$/.test(cleanId);
+      const userQuery: any = { $or: [{ user_id: cleanId }] };
+      if (isNumeric) {
+        userQuery.$or.push({ mobile_number: Number(cleanId) });
+        if (cleanId.startsWith('91') && cleanId.length === 12) userQuery.$or.push({ mobile_number: Number(cleanId.substring(2)) });
+      }
+      const dbUser = await User.findOne(userQuery);
+      const resolved = await resolveUserData(dbUser);
+      const regionId = resolveRegionId(resolved);
+      const carType = resolved?.suggestedCar?.car_type || 'hatchback';
+
+      let messages = contextCache.get(cacheKey) || [];
+      if (messages.length === 0) {
+        const chat = await Chat.findOne({ userId, platform });
+        if (chat) messages = [...(chat.messages || [])];
+      }
+
+      const timestamp = new Date();
+      console.log(`\n[${timestamp.toLocaleTimeString()}] INCOMING [${platform}] from ${userId}: "${text}"`);
+
+      let draft = bookingDrafts.get(cacheKey) || { step: 'idle' };
+      let interactiveHandled = false;
+      let systemMessage = "";
+
+      const cancelIntent = /nahi\s*chahiye|mat\s*karo|don.?t\s*want|not\s*interested|bad\s*service|choro\s*yar|chhodo|nai\s*chahiye|band\s*karo|no\s*booking|no\s*thanks|nai\s*krni|nai\s*karni/i.test(text);
+      if (cancelIntent && draft.step !== 'idle') {
+        bookingDrafts.delete(cacheKey);
+        draft = { step: 'idle' };
+        systemMessage = 'User expressed they do NOT want a booking or is unhappy. Empathize genuinely, apologize if needed, and reset completely. Do NOT mention booking or services unless they bring it up.';
+        interactiveHandled = true;
+      }
+
+      if (!interactiveHandled && text === 'show_more_services') {
+        const allServices = userServiceCache.get(cacheKey) || await getServicesForUser(regionId, carType);
+        userServiceCache.set(cacheKey, allServices);
+        const currentOffset = (draft.serviceOffset || 0) + 10;
+        if (isWhatsApp && allServices.length > currentOffset) {
+          await sendWhatsAppServiceList(userId, phoneId!, allServices, currentOffset);
+          draft = { ...draft, step: 'picking_service', serviceOffset: currentOffset };
+          bookingDrafts.set(cacheKey, draft);
+        } else if (isWhatsApp) {
+          await sendWhatsAppText(userId, phoneId!, 'Yeh sab services hain. Ab choose karo');
+        }
+        messages.push({ role: 'user', text, timestamp });
+        messages.push({ role: 'model', text: 'Services dikhaye gaye', timestamp: new Date() });
+        contextCache.set(cacheKey, messages.slice(-20));
+        persistChat(userId, platform, messages);
+        return '';
+      }
+
+      if (!interactiveHandled && text === 'show_more_info_services') {
+        const allServices = userServiceCache.get(cacheKey) || await getServicesForUser(regionId, carType);
+        userServiceCache.set(cacheKey, allServices);
+        const currentOffset = (draft.serviceOffset || 0) + 10;
+        if (isWhatsApp && allServices.length > currentOffset) {
+          await sendWhatsAppServiceInfoList(userId, phoneId!, allServices, currentOffset);
+          draft = { ...draft, step: 'picking_service', serviceOffset: currentOffset };
+          bookingDrafts.set(cacheKey, draft);
+        }
+        messages.push({ role: 'user', text, timestamp });
+        messages.push({ role: 'model', text: 'Services info widget sent', timestamp: new Date() });
+        contextCache.set(cacheKey, messages.slice(-20));
+        persistChat(userId, platform, messages);
+        return '';
+      }
+
+      if (text.startsWith('svc_info_')) {
+        const serviceId = text.replace('svc_info_', '');
+        const allServices = userServiceCache.get(cacheKey) || await getServicesForUser(regionId, carType);
+        const selectedService = allServices.find((s: any) => s._id === serviceId);
+        if (selectedService) {
+          const fullDetails = await getServiceDetails(serviceId, regionId);
+          if (isWhatsApp && fullDetails) await sendServiceDetailsMessage(userId, phoneId!, fullDetails);
+          draft = { ...draft, step: 'viewing_details', serviceId: selectedService._id, serviceName: selectedService.name, price: selectedService.price, discount: selectedService.discount || 0, serviceOffset: 0 };
+          bookingDrafts.set(cacheKey, draft);
+          messages.push({ role: 'user', text, timestamp });
+          messages.push({ role: 'model', text: 'Service details bheje gaye', timestamp: new Date() });
+          contextCache.set(cacheKey, messages.slice(-20));
+          persistChat(userId, platform, messages);
+          return '';
+        }
+        interactiveHandled = true;
+      } else if (text.startsWith('svc_')) {
+        const serviceId = text.replace('svc_', '');
+        const allServices = userServiceCache.get(cacheKey) || await getServicesForUser(regionId, carType);
+        const selectedService = allServices.find((s: any) => s._id === serviceId);
+        if (selectedService) {
+          draft = { ...draft, step: 'picking_date', serviceId: selectedService._id, serviceName: selectedService.name, price: selectedService.price, discount: selectedService.discount || 0, serviceOffset: 0 };
+          bookingDrafts.set(cacheKey, draft);
+          const bookingPrompt = `Awesome choice! Aapne *${selectedService.name}* select kiya hai.\n\nAapko yeh service kis date ko chahiye? (e.g., Today, Tomorrow, ya koi specific date bataiye)`;
+          if (isWhatsApp) await sendWhatsAppText(userId, phoneId!, bookingPrompt);
+          messages.push({ role: 'user', text, timestamp });
+          messages.push({ role: 'model', text: bookingPrompt, timestamp: new Date() });
+          contextCache.set(cacheKey, messages.slice(-20));
+          persistChat(userId, platform, messages);
+          return bookingPrompt;
+        } else { interactiveHandled = true; }
+      } else if (text.startsWith('slot_')) {
+        const slotMap = draft.slotMap || {};
+        const time = slotMap[text] || text.replace('slot_', '');
+        draft = { ...draft, step: 'confirming', time };
+        bookingDrafts.set(cacheKey, draft);
+        if (isWhatsApp && resolved) {
+          await sendWhatsAppConfirmation(userId, phoneId!, draft, resolved);
+          const confirmMsg = `Booking confirm karne ke liye niche button dabayein: ${draft.serviceName} on ${formatDateDisplay(draft.date)} at ${time}.`;
+          messages.push({ role: 'user', text, timestamp });
+          messages.push({ role: 'model', text: confirmMsg, timestamp: new Date() });
+          contextCache.set(cacheKey, messages.slice(-20));
+          persistChat(userId, platform, messages);
+          return confirmMsg;
+        }
+        systemMessage = `User picked time slot: ${time}. Show them a confirmation summary and ask to confirm.`;
+        interactiveHandled = true;
+      } else if (text === 'confirm_booking') {
+        if (draft.step === 'confirming' && draft.serviceId && draft.date && draft.time && resolved) {
+          const result = await createBookingViaAPI(draft, resolved);
+          if (result.success) {
+            const successText = `Booking ho gayi!\n\nService: ${draft.serviceName}\nDate: ${formatDateDisplay(draft.date)}\nTime: ${draft.time}\n\nOur team will reach you on time.`;
+            if (isWhatsApp) await sendWhatsAppText(userId, phoneId!, successText);
+            bookingDrafts.delete(cacheKey);
+            messages.push({ role: 'user', text: 'confirm_booking', timestamp });
+            messages.push({ role: 'model', text: successText, timestamp: new Date() });
+            contextCache.set(cacheKey, messages.slice(-20));
+            persistChat(userId, platform, messages);
+            return successText;
+          } else {
+            const errText = `Bhai, kuch technical issue hua! Please call us directly or try again. Error: ${result.error}`;
+            if (isWhatsApp) await sendWhatsAppText(userId, phoneId!, errText);
+            return errText;
+          }
+        }
+        systemMessage = "User wants to confirm booking but details are incomplete. Ask them to restart the booking flow.";
+        interactiveHandled = true;
+      } else if (text === 'cancel_booking') {
+        bookingDrafts.delete(cacheKey);
+        const cancelText = "No problem bhai! Jab bhi gaadi chamkani ho, batao.";
+        if (isWhatsApp) await sendWhatsAppText(userId, phoneId!, cancelText);
+        messages.push({ role: 'user', text: 'cancel_booking', timestamp });
+        messages.push({ role: 'model', text: cancelText, timestamp: new Date() });
+        contextCache.set(cacheKey, messages.slice(-20));
+        persistChat(userId, platform, messages);
+        return cancelText;
+      }
+
+      const inDateSelection = draft.step === 'picking_date' || draft.step === 'picking_slot';
+      if (!interactiveHandled && (inDateSelection || text.match(/today|tomorrow|kal|aaj|parso|\d{1,2}\s*(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec|\d{4})/i))) {
+        const parsedDate = parseUserDate(text, inDateSelection);
+        if (parsedDate) {
+          if (isDateInPast(parsedDate)) {
+            const pastMsg = `Bhai, ${formatDateDisplay(parsedDate)} toh already guzar gayi! Future date batao - kab chahiye?`;
+            if (isWhatsApp) await sendWhatsAppText(userId, phoneId!, pastMsg);
+            messages.push({ role: 'user', text, timestamp });
+            messages.push({ role: 'model', text: pastMsg, timestamp: new Date() });
+            contextCache.set(cacheKey, messages.slice(-20));
+            persistChat(userId, platform, messages);
+            return pastMsg;
+          }
+          if (inDateSelection) {
+            const regionQuery: any = { date: parsedDate, weeklyOff: { $ne: true } };
+            if (regionId && mongoose.Types.ObjectId.isValid(regionId)) regionQuery.region = new mongoose.Types.ObjectId(regionId);
+            let exactDoc = await AvailableSlots.findOne(regionQuery).lean() as any || await AvailableSlots.findOne({ date: parsedDate, weeklyOff: { $ne: true } }).lean() as any;
+            if (!exactDoc) {
+              const nearestDoc = await AvailableSlots.findOne({ date: { $gt: parsedDate }, weeklyOff: { $ne: true } }).sort({ date: 1 }).lean() as any;
+              if (nearestDoc) {
+                const offerMsg = `Bhai, *${formatDateDisplay(parsedDate)}* ke liye koi slot nahi hai. Nearest available date hai *${formatDateDisplay(nearestDoc.date)}*. Kya us din book karein?`;
+                if (isWhatsApp) await sendWhatsAppText(userId, phoneId!, offerMsg);
+                draft = { ...draft, step: 'picking_date', _suggestedDate: nearestDoc.date };
+                bookingDrafts.set(cacheKey, draft);
+                messages.push({ role: 'user', text, timestamp });
+                messages.push({ role: 'model', text: offerMsg, timestamp: new Date() });
+                contextCache.set(cacheKey, messages.slice(-20));
+                persistChat(userId, platform, messages);
+                return offerMsg;
+              } else {
+                const noSlotMsg = `Bhai, koi date available nahi dikh raha. Please humein call karein!`;
+                if (isWhatsApp) await sendWhatsAppText(userId, phoneId!, noSlotMsg);
+                return noSlotMsg;
+              }
+            }
+            const slotsRaw: string[] = (exactDoc.timeSlots || []).filter((s: any) => !s.maxLimit || s.bookingCount < s.maxLimit).map((s: any) => s.time);
+            const todayStr = new Date().toISOString().split('T')[0];
+            let slots = slotsRaw;
+            if (parsedDate === todayStr) {
+              const now = new Date();
+              const cutoff = new Date(now.getTime() + 2 * 60 * 60 * 1000);
+              const cutoffH = cutoff.getHours(), cutoffM = cutoff.getMinutes();
+              slots = slotsRaw.filter(t => {
+                const m2 = t.split('-')[0]?.trim().match(/(\d{1,2}):(\d{2})\s*(AM|PM)/i);
+                if (!m2) return false;
+                let h = parseInt(m2[1]); const mn = parseInt(m2[2]); const p = m2[3].toUpperCase();
+                if (p === 'PM' && h !== 12) h += 12;
+                if (p === 'AM' && h === 12) h = 0;
+                return h > cutoffH || (h === cutoffH && mn >= cutoffM);
+              });
+            }
+            if (slots.length === 0) {
+              const noTimeMsg = `Bhai, ${formatDateDisplay(parsedDate)} ke liye koi slot available nahi. Koi aur date try karo?`;
+              if (isWhatsApp) await sendWhatsAppText(userId, phoneId!, noTimeMsg);
+              messages.push({ role: 'user', text, timestamp });
+              messages.push({ role: 'model', text: noTimeMsg, timestamp: new Date() });
+              contextCache.set(cacheKey, messages.slice(-20));
+              persistChat(userId, platform, messages);
+              return noTimeMsg;
+            }
+            draft = { ...draft, step: 'picking_slot', date: parsedDate };
+            bookingDrafts.set(cacheKey, draft);
+            if (isWhatsApp) {
+              await sendWhatsAppText(userId, phoneId!, `Okay! ${formatDateDisplay(parsedDate)} ke liye slot dhundta hoon...`);
+              await sendWhatsAppSlotButtons(userId, phoneId!, slots, parsedDate);
+            }
+            const slotMsg = `${parsedDate} ke liye available slots: ${slots.join(', ')}`;
+            messages.push({ role: 'user', text, timestamp });
+            messages.push({ role: 'model', text: slotMsg, timestamp: new Date() });
+            contextCache.set(cacheKey, messages.slice(-20));
+            persistChat(userId, platform, messages);
+            return slotMsg;
+          }
+        } else if (inDateSelection && !parsedDate) {
+          const nudge = `Bhai, date samajh nahi aaya! Yeh try karo:\n- "kal" (tomorrow)\n- "29 April"\n- "2026-04-29"\nKab chahiye service?`;
+          if (isWhatsApp) await sendWhatsAppText(userId, phoneId!, nudge);
+          messages.push({ role: 'user', text, timestamp });
+          messages.push({ role: 'model', text: nudge, timestamp: new Date() });
+          contextCache.set(cacheKey, messages.slice(-20));
+          persistChat(userId, platform, messages);
+          return nudge;
+        }
+      }
+
+      if (!interactiveHandled && draft.step === 'picking_slot' && draft.date && draft.slotMap) {
+        const { slots } = await getAvailableSlots(regionId, draft.date);
+        if (isWhatsApp && slots.length > 0) {
+          await sendWhatsAppText(userId, phoneId!, `Bhai, slot select karo na! Yeh dekho:`);
+          await sendWhatsAppSlotButtons(userId, phoneId!, slots, draft.date);
+          messages.push({ role: 'user', text, timestamp });
+          const msg2 = `Slot fir se bheja ${draft.date} ke liye`;
+          messages.push({ role: 'model', text: msg2, timestamp: new Date() });
+          contextCache.set(cacheKey, messages.slice(-20));
+          persistChat(userId, platform, messages);
+          return msg2;
+        }
+      }
+
+      const wantsServiceDetails = /details?|info|kya.*details|show.*detail|service.*detail|kitna.*time|full.*detail|thoda.*details|details?.*chahiye/i.test(text);
+      const wantsServices = /service|book|wash|clean|menu|what.*offer|kya.*milega|packages?|show more|aur.*dikhao|more service|kitne.*options/i.test(text);
+      const wantsMoreServices = /^(more|aur dikhao|aur batao|baaki|remaining|show more|next)$/i.test(text.trim());
+
+      if (wantsServiceDetails) {
+        const allServices = await getServicesForUser(regionId, carType);
+        userServiceCache.set(cacheKey, allServices);
+        if (isWhatsApp && allServices.length > 0) {
+          await sendWhatsAppServiceInfoList(userId, phoneId!, allServices, 0);
+          draft = { ...draft, step: 'picking_service', serviceOffset: 0 };
+          bookingDrafts.set(cacheKey, draft);
+          messages.push({ role: 'user', text, timestamp });
+          messages.push({ role: 'model', text: 'Service details widget sent', timestamp: new Date() });
+          contextCache.set(cacheKey, messages.slice(-20));
+          persistChat(userId, platform, messages);
+          return '';
+        }
+      } else if (wantsServices || wantsMoreServices) {
+        const allServices = await getServicesForUser(regionId, carType);
+        userServiceCache.set(cacheKey, allServices);
+        if (isWhatsApp && allServices.length > 0) {
+          const currentOffset = (wantsMoreServices && !wantsServices) ? (draft.serviceOffset || 0) + 10 : 0;
+          await sendWhatsAppServiceList(userId, phoneId!, allServices, currentOffset);
+          draft = { ...draft, step: 'picking_service', serviceOffset: currentOffset };
+          bookingDrafts.set(cacheKey, draft);
+          messages.push({ role: 'user', text, timestamp });
+          messages.push({ role: 'model', text: 'Services dikhaye gaye', timestamp: new Date() });
+          contextCache.set(cacheKey, messages.slice(-20));
+          persistChat(userId, platform, messages);
+          return '';
+        }
+      }
+
+      if (draft.step === 'viewing_details') {
+        const wantsToBook = /book|book karo|confirm|book karna|book krna/i.test(text);
+        const dateDetected = /today|tomorrow|kal|aaj|parso|\d{1,2}\s*(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec|\d{4})/i.test(text);
+        if (wantsToBook || dateDetected) {
+          draft.step = 'picking_date';
+          bookingDrafts.set(cacheKey, draft);
+        } else {
+          messages.push({ role: 'user', text, timestamp });
+          contextCache.set(cacheKey, messages.slice(-20));
+          persistChat(userId, platform, messages);
+          return '';
+        }
+      }
+
+      const servicesForContext = userServiceCache.get(cacheKey) || await getServicesForUser(regionId, carType);
+      if (!userServiceCache.has(cacheKey)) userServiceCache.set(cacheKey, servicesForContext);
+      const dynamicKnowledge = await getDynamicKnowledge(userId, servicesForContext);
+      const draftContext = draft.step !== 'idle' ? `\nCURRENT BOOKING DRAFT:\n- Step: ${draft.step}\n- Service: ${draft.serviceName || 'not selected'} (₹${draft.price || '?'})\n- Date: ${draft.date || 'not selected'}\n- Time: ${draft.time || 'not selected'}\n` : '';
+
+      messages.push({ role: "user", text, timestamp });
+      const aiResponse = await callAI(messages.slice(-10), CARMAA_CONTEXT + "\n\n" + dynamicKnowledge + draftContext + (interactiveHandled ? `\n\nSYSTEM NOTE: ${systemMessage}` : ''));
+
+      console.log(`[${new Date().toLocaleTimeString()}] OUTGOING [${platform}] to ${userId}: "${aiResponse.slice(0, 60)}..."`);
+      messages.push({ role: "model", text: aiResponse, timestamp: new Date() });
+      contextCache.set(cacheKey, messages.slice(-20));
+      persistChat(userId, platform, messages);
+      if (isWhatsApp) await sendWhatsAppText(userId, phoneId!, aiResponse);
+      return aiResponse;
+
+    } catch (error: any) {
+      if (error.response?.status === 401) {
+        console.error("WHATSAPP ERROR: Token Expired");
+      } else {
+        console.error("Error in handleMessage:", error.message || error);
+      }
+      return "Sorry bhai, kuch gadbad hai! Thoda wait karo.";
+    }
+  }
+
+  function persistChat(userId: string, platform: string, messages: any[]) {
+    (async () => {
+      const { score, reason } = calculateLeadScore(messages);
+      await Chat.findOneAndUpdate(
+        { userId, platform },
+        { $set: { messages, leadScore: score, scoreReason: reason, lastUpdated: new Date() } },
+        { upsert: true }
+      );
+    })().catch(err => console.error("DB Update Error:", err));
   }
 
   // --- Vite Middleware (local dev only) ---
