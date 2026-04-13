@@ -3,15 +3,15 @@
   "rewrites": [
     {
       "source": "/api/(.*)",
-      "destination": "/api/server.ts"
+      "destination": "/api/index.ts"
     },
     {
       "source": "/webhook",
-      "destination": "/api/server.ts"
+      "destination": "/api/index.ts"
     },
     {
       "source": "/widget.js",
-      "destination": "/api/server.ts"
+      "destination": "/api/index.ts"
     },
     {
       "source": "/(.*)",
