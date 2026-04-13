@@ -22,7 +22,7 @@ dotenv.config();
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 // --- MongoDB Setup ---
-const MONGODB_URI = process.env.MONGODB_URI 
+const MONGODB_URI = process.env.MONGODB_URI;
 async function connectDB() {
   if (mongoose.connection.readyState >= 1) return;
   try {
