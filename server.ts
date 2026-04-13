@@ -7,23 +7,22 @@ import axios from "axios";
 import dotenv from "dotenv";
 import mongoose from "mongoose";
 import cors from "cors";
-import { Chat } from "./models/Chat.ts";
-import { User } from "./models/User.ts";
-import { Service } from "./models/Service.ts";
-import { Booking } from "./models/Booking.ts";
-import { CarModel } from "./models/CarModel.ts";
-import { AvailableSlots } from "./models/AvailableSlots.ts";
-import { City } from "./models/City.ts";
-import { Prerequisites } from "./models/Prerequisites.ts";
-import { WhatIncludes } from "./models/WhatIncludes.ts";
+import { Chat } from "./models/Chat";
+import { User } from "./models/User";
+import { Service } from "./models/Service";
+import { Booking } from "./models/Booking";
+import { CarModel } from "./models/CarModel";
+import { AvailableSlots } from "./models/AvailableSlots";
+import { City } from "./models/City";
+import { Prerequisites } from "./models/Prerequisites";
+import { WhatIncludes } from "./models/WhatIncludes";
 
 dotenv.config();
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 // --- MongoDB Setup ---
-const MONGODB_URI = process.env.MONGODB_URI || "mongodb+srv://carmaa786:carmaaxyz123@cluster0.rvwf0.mongodb.net/carmaa?retryWrites=true&w=majority&appName=Cluster0";
-
+const MONGODB_URI = process.env.MONGODB_URI 
 async function connectDB() {
   if (mongoose.connection.readyState >= 1) return;
   try {
