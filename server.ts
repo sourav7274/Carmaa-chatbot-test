@@ -1,6 +1,7 @@
 import express from "express";
 import { createServer as createViteServer } from "vite";
 import path from "path";
+import fs from "fs";
 import { fileURLToPath } from "url";
 import axios from "axios";
 import dotenv from "dotenv";
@@ -23,9 +24,15 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 // --- MongoDB Setup ---
 const MONGODB_URI = process.env.MONGODB_URI || "mongodb+srv://carmaa786:carmaaxyz123@cluster0.rvwf0.mongodb.net/carmaa?retryWrites=true&w=majority&appName=Cluster0";
 
-mongoose.connect(MONGODB_URI)
-  .then(() => console.log("✅ Connected to MongoDB"))
-  .catch(err => console.error("MongoDB connection error:", err));
+async function connectDB() {
+  if (mongoose.connection.readyState >= 1) return;
+  try {
+    await mongoose.connect(MONGODB_URI);
+    console.log("✅ Connected to MongoDB");
+  } catch (err) {
+    console.error("MongoDB connection error:", err);
+  }
+}
 
 // --- In-Memory Caches ---
 // Near-zero latency context cache for active sessions
@@ -1653,7 +1660,7 @@ CURRENT BOOKING DRAFT:
   });
 
   // --- Vite Middleware (local dev only) ---
-  if (process.env.NODE_ENV !== "production") {
+  if (process.env.NODE_ENV !== "production" && !process.env.VERCEL) {
     const vite = await createViteServer({
       server: { middlewareMode: true },
       appType: "spa",
@@ -1664,8 +1671,10 @@ CURRENT BOOKING DRAFT:
     // Only serve locally built dist if not on Vercel
     if (!process.env.VERCEL) {
       const distPath = path.join(__dirname, "dist");
-      app.use(express.static(distPath));
-      app.get("*", (req, res) => res.sendFile(path.join(distPath, "index.html")));
+      if (fs.existsSync(distPath)) {
+        app.use(express.static(distPath));
+        app.get("*", (req, res) => res.sendFile(path.join(distPath, "index.html")));
+      }
     }
   }
 
@@ -1679,6 +1688,7 @@ let _app: any;
 
 async function getApp() {
   if (!_app) {
+    await connectDB();
     _app = await startServer();
   }
   return _app;

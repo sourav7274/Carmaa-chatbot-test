@@ -1,0 +1,21 @@
+{
+  "version": 2,
+  "rewrites": [
+    {
+      "source": "/api/(.*)",
+      "destination": "/api/server.ts"
+    },
+    {
+      "source": "/webhook",
+      "destination": "/api/server.ts"
+    },
+    {
+      "source": "/widget.js",
+      "destination": "/api/server.ts"
+    },
+    {
+      "source": "/(.*)",
+      "destination": "/index.html"
+    }
+  ]
+}
