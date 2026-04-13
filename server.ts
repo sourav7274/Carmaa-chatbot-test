@@ -917,6 +917,74 @@ PROMPT NOTE: Use the [PRIMARY] car/address. If VIP, treat them royally.`;
 
   // --- AI Client: Ollama (primary, local) → Gemini (fallback, cloud) ---
   async function callAI(messages: any[], systemInstruction: string): Promise<string> {
+    // 1. Primary: Gemma API (Google AI Studio)
+    try {
+      const gemmaKey = process.env.GEMMA_API_KEY;
+      const gemmaModel = process.env.GEMMA_MODEL;
+
+      if (gemmaKey && gemmaKey.length > 10) {
+        console.log(`[AI] 🚀 Attempting Primary: Gemma (${gemmaModel})...`);
+        const { GoogleGenAI } = await import('@google/genai');
+        const genAI = new GoogleGenAI({ apiKey: gemmaKey });
+        
+        const history = messages.slice(-10).map(m => ({
+          role: m.role === 'user' ? 'user' : 'model',
+          parts: [{ text: m.text }]
+        }));
+
+        const response = await genAI.models.generateContent({
+          model: gemmaModel,
+          contents: history,
+          config: { systemInstruction }
+        });
+
+        const reply = response.text;
+        if (reply) {
+          console.log(`[AI] ✅ Gemma Primary (${gemmaModel}) response received.`);
+          return reply;
+        }
+      } else {
+        console.warn(`[AI] ⚠️ GEMMA_API_KEY missing or invalid in environment. Skipping primary.`);
+      }
+    } catch (err: any) {
+      console.warn(`[AI] ⚠️ Gemma Primary failed: ${err.message}`);
+    }
+
+    // 2. Fallback: Gemini API
+    try {
+      const geminiKey = process.env.GEMINI_API_KEY;
+      const geminiModel = process.env.GEMINI_MODEL;
+
+      if (geminiKey && geminiKey.length > 10) {
+        console.log(`[AI] 🔄 Falling back to Gemini: (${geminiModel})...`);
+        const { GoogleGenAI } = await import('@google/genai');
+        const genAI = new GoogleGenAI({ apiKey: geminiKey });
+        
+        const history = messages.slice(-10).map(m => ({
+          role: m.role === 'user' ? 'user' : 'model',
+          parts: [{ text: m.text }]
+        }));
+
+        const response = await genAI.models.generateContent({
+          model: geminiModel,
+          contents: history,
+          config: { systemInstruction }
+        });
+
+        const reply = response.text;
+        if (reply) {
+          console.log(`[AI] ✅ Gemini Fallback (${geminiModel}) response received.`);
+          return reply;
+        }
+      } else {
+        console.error(`[AI] ❌ GEMINI_API_KEY missing or invalid in environment. No further fallback.`);
+      }
+    } catch (err: any) {
+      console.error('[AI] ❌ Gemini Fallback also failed:', err.message);
+    }
+
+    /* 
+    // --- PREVIOUS OLLAMA LOGIC (Commented out per request) ---
     // 1. Try Ollama (local)
     // Use 127.0.0.1 instead of localhost because Node 18+ resolves localhost to IPv6 (::1) first,
     // which causes ECONNREFUSED if Ollama is only listening on IPv4.
@@ -943,34 +1011,7 @@ PROMPT NOTE: Use the [PRIMARY] car/address. If VIP, treat them royally.`;
     } catch (err: any) {
       console.warn(`[AI] ⚠️  Ollama unavailable (${err.code || err.message}) — falling back to Gemini`);
     }
-
-    // 2. Fallback: Gemini API
-    try {
-      const apiKey = process.env.GEMINI_API_KEY;
-      if (!apiKey || apiKey.length < 10) {
-         // This prevents the SDK from hanging while looking for Google Cloud Default Credentials
-         throw new Error("GEMINI_API_KEY is missing or invalid in environment.");
-      }
-
-      const { GoogleGenAI } = await import('@google/genai');
-      const genAI = new GoogleGenAI({ apiKey });
-      const history = messages.slice(-10).map(m => ({
-        role: m.role === 'user' ? 'user' : 'model',
-        parts: [{ text: m.text }]
-      }));
-      const response = await genAI.models.generateContent({
-        model: process.env.GEMINI_MODEL || 'gemini-1.5-flash',
-        contents: history,
-        config: { systemInstruction }
-      });
-      const reply = response.text;
-      if (reply) {
-        console.log(`[AI] ✅ Gemini fallback (${process.env.GEMINI_MODEL || 'gemini-1.5-flash'})`);
-        return reply;
-      }
-    } catch (err: any) {
-      console.error('[AI] ❌ Gemini also failed:', err.message);
-    }
+    */
 
     return "Bro, AI thoda busy hai abhi! Ek min mein dobara try karo.";
   }
